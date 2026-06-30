@@ -583,6 +583,9 @@ def _closeness_key(
     entries = blood_groups.get(key, [])
     if not entries:
         return 999
+    # `or 0` is defensive: in practice every entry (blood and in-law, incl.
+    # сваты which are forced to gen=(1,1)) stores integer gen values, so the
+    # None-fallback is never actually taken — it just guards future callers.
     return min((e["gen_a"] or 0) + (e["gen_b"] or 0) for e in entries)
 
 
