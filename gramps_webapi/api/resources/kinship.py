@@ -31,6 +31,14 @@ Two public functions:
     are collected via a bounded candidate scan and the affinal calculator.
 
 Engine only — no Flask resources, no endpoint registration, no schemas.
+
+Sibling shape note (empirically verified on live tree):
+    ``get_relationship_distance_new`` emits TWO raw rows for full siblings —
+    one via the father path ('f'/'f') and one via the mother path ('m'/'m').
+    The 's' marker only appears for orphan-family siblings (extremely rare).
+    ``common_ancestors`` consolidates all min-rank rows whose ancestor handles
+    are in the same family into ONE entry so callers always get a single
+    ``{"ancestor_handles": [father, mother], ...}`` entry for the sibling case.
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ from typing import Any
 
 from gramps.gen.db.base import DbReadBase
 from gramps.gen.lib import Person
-from gramps.gen.relationship import get_relationship_calculator
+from gramps.gen.relationship import RelationshipCalculator, get_relationship_calculator
 from gramps.gen.utils.db import get_birth_or_fallback
 from gramps.gen.utils.grampslocale import GrampsLocale
 
@@ -61,9 +69,7 @@ _REL_FATHER = "f"
 _REL_MOTHER = "m"
 _REL_FATHER_NOTBIRTH = "F"
 _REL_MOTHER_NOTBIRTH = "M"
-# Sibling or family markers may appear in the raw output; we treat them as
-# path terminators (no further parent step to follow).
-_REL_BIRTH_CHARS = frozenset("fm")
+# Sibling or family markers may appear in the raw output in parentless families.
 _REL_ANY_PARENT_CHARS = frozenset("fmFM")
 
 
@@ -78,7 +84,7 @@ def _walk_path_to_ancestor(
     ``RelationshipCalculator.__apply_filter``:
       'f' / 'F'  →  go to father (birth / non-birth)
       'm' / 'M'  →  go to mother (birth / non-birth)
-      's'        →  sibling marker (no parent step; treated as terminator)
+      's'        →  sibling marker (parentless family — treated as terminator)
       'a'        →  family marker from collapse_relations (treated as terminator)
 
     The returned list contains the handles of all persons *strictly between*
@@ -144,6 +150,19 @@ def _birth_sort_key(db: DbReadBase, handle: str) -> tuple[int, int]:
     return (date.get_sort_value(), 0)
 
 
+def _parent_handles_set(db: DbReadBase, person: Person) -> set[str]:
+    """Return the set of all parent handles of *person* across all families."""
+    result: set[str] = set()
+    for fam_h in person.get_parent_family_handle_list():
+        fam = db.get_family_from_handle(fam_h)
+        if fam is None:
+            continue
+        for ph in (fam.get_father_handle(), fam.get_mother_handle()):
+            if ph:
+                result.add(ph)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Function A — common_ancestors
 # ---------------------------------------------------------------------------
@@ -177,6 +196,13 @@ def common_ancestors(
 
     If the two people are unrelated the dict has ``relationship=None`` and an
     empty ``ancestors`` list.
+
+    Sibling consolidation:
+        For full siblings the raw output has two rows — father path and mother
+        path — both at the same minimum rank.  These are consolidated into a
+        single ``ancestors`` entry with ``ancestor_handles`` = shared parents,
+        matching the spec contract "both common parents for the sibling case".
+        For half-siblings only the shared parent(s) appear in the intersection.
     """
     calc = get_relationship_calculator(reinit=True, clocale=locale)
 
@@ -194,8 +220,8 @@ def common_ancestors(
     if not raw_data or raw_data[0][0] == -1:
         return {"relationship": None, "ancestors": []}
 
-    # Filter to minimum-rank rows only (closest common ancestors).
-    min_rank = raw_data[0][0]
+    # Fix 4: compute min_rank safely rather than assuming sorted order.
+    min_rank = min(row[0] for row in raw_data if row[0] != -1)
     closest = [row for row in raw_data if row[0] == min_rank]
 
     # Compute the localized relationship label using the collapsed renderer
@@ -233,35 +259,87 @@ def common_ancestors(
             )
 
     # Build the ancestors list from the raw rows.
+    # -----------------------------------------------------------------------
+    # Sibling / parent-pair consolidation (Fix 3):
+    #
+    # For full siblings the raw output produces TWO rows at the same minimum
+    # rank: one for the father and one for the mother (both path lengths = 1).
+    # The 's' marker only appears for siblings in a parentless family (extremely
+    # rare / test data) — we handle it for robustness but it is NOT the normal
+    # sibling shape on a real tree.
+    #
+    # We consolidate all min-rank single-step rows (dist_a==1, dist_b==1) into
+    # ONE entry whose ancestor_handles = shared parent handles (intersection of
+    # both people's parents), with empty paths.  This covers:
+    #   - Full siblings: 2 rows → 1 entry, ancestor_handles=[father, mother]
+    #   - Half-siblings: 1 row  → 1 entry, ancestor_handles=[shared parent]
+    #   - 's'-marker siblings: handled as a special case below
+    # -----------------------------------------------------------------------
+    sibling_rows = [
+        row for row in closest
+        if len(row[2]) == 1 and len(row[4]) == 1
+        and row[2] not in ("s",) and row[4] not in ("s",)
+        and row[2] in _REL_ANY_PARENT_CHARS and row[4] in _REL_ANY_PARENT_CHARS
+    ]
+    # 's'-marker rows (parentless-family siblings)
+    sibling_s_rows = [
+        row for row in closest
+        if row[2] == "s" or row[4] == "s"
+    ]
+    # Regular rows: paths longer than 1 step (normal non-sibling relations)
+    regular_rows = [
+        row for row in closest
+        if row not in sibling_rows and row not in sibling_s_rows
+    ]
+
     ancestors: list[dict[str, Any]] = []
-    for row in closest:
-        rank, anc_handle, path_a_str, _fam_a, path_b_str, _fam_b = row
-        dist_a_raw = len(path_a_str)
-        dist_b_raw = len(path_b_str)
 
-        # Sibling branch: dist_a == 1, dist_b == 1, and the path chars are
-        # 's' (sibling) rather than 'f'/'m'.  In this case there is no single
-        # common ancestor node; instead both parents are the "common ancestors".
-        if dist_a_raw == 1 and dist_b_raw == 1 and path_a_str == "s":
-            # Collect both parents of person_a as the common ancestor handles.
-            ancestor_handles: list[str] = []
-            for fam_h in person_a.get_parent_family_handle_list():
-                fam = db.get_family_from_handle(fam_h)
-                if fam is None:
-                    continue
-                for ph in (fam.get_father_handle(), fam.get_mother_handle()):
-                    if ph and ph not in ancestor_handles:
-                        ancestor_handles.append(ph)
-            ancestors.append(
-                {
-                    "ancestor_handles": ancestor_handles,
-                    "path_a": [],
-                    "path_b": [],
-                }
-            )
-            continue
+    # Consolidate normal sibling rows into one entry.
+    if sibling_rows:
+        # Shared parents = intersection of both persons' parent sets (Fix 3a).
+        parents_a = _parent_handles_set(db, person_a)
+        parents_b = _parent_handles_set(db, person_b)
+        shared = list(parents_a & parents_b)
+        # Preserve insertion order by sorting through the union (keeps father
+        # before mother as encountered in family handle lists).
+        ordered: list[str] = []
+        for ph in list(parents_a) + list(parents_b):
+            if ph in shared and ph not in ordered:
+                ordered.append(ph)
+        ancestors.append(
+            {
+                "ancestor_handles": ordered,
+                "path_a": [],
+                "path_b": [],
+            }
+        )
 
-        # Normal case: anc_handle is the single common ancestor.
+    # Handle parentless-family 's'-marker rows.
+    for row in sibling_s_rows:
+        _rank, anc_handle, _pa, _fa, _pb, _fb = row
+        # Collect parents of person_a; no common ancestor handle is available.
+        parents_a = _parent_handles_set(db, person_a)
+        parents_b = _parent_handles_set(db, person_b)
+        shared = list(parents_a & parents_b)
+        ordered2: list[str] = []
+        for ph in list(parents_a) + list(parents_b):
+            if ph in shared and ph not in ordered2:
+                ordered2.append(ph)
+        # Fall back to all of person_a's parents if no shared parents found.
+        if not ordered2:
+            ordered2 = list(parents_a)
+        ancestors.append(
+            {
+                "ancestor_handles": ordered2,
+                "path_a": [],
+                "path_b": [],
+            }
+        )
+
+    # Process regular (non-sibling) rows.
+    for row in regular_rows:
+        _rank, anc_handle, path_a_str, _fam_a, path_b_str, _fam_b = row
+
         if anc_handle is None:
             continue
 
@@ -331,16 +409,15 @@ def _classify(gen_a: int, gen_b: int) -> str:
     if gen_b == 1 and gen_a >= 2:
         if gen_a == 2:
             return "uncle_aunt"
-        return f"great_uncle_aunt_{gen_a - 2}" if gen_a > 2 else "uncle_aunt"
+        return f"great_uncle_aunt_{gen_a - 2}"
 
     # Nieces/nephews: anchor is 1 below common ancestor, relative goes down 2+
     if gen_a == 1 and gen_b >= 2:
         if gen_b == 2:
             return "niece_nephew"
-        return f"great_niece_nephew_{gen_b - 2}" if gen_b > 2 else "niece_nephew"
+        return f"great_niece_nephew_{gen_b - 2}"
 
     # Cousins: both are 2+ steps from common ancestor via collateral line
-    # gen_a - 1 == gen_b - 1 → first/second/etc cousin (no removal)
     # Removal = |gen_a - gen_b|, level = min(gen_a, gen_b) - 1
     level = min(gen_a, gen_b) - 1
     removal = abs(gen_a - gen_b)
@@ -413,7 +490,7 @@ def _descendants_bfs(
 
 
 def _label_blood(
-    calc: Any,
+    calc: RelationshipCalculator,
     db: DbReadBase,
     anchor: Person,
     person: Person,
@@ -423,36 +500,66 @@ def _label_blood(
 ) -> str:
     """Produce a localized blood-relationship label for *person* w.r.t. *anchor*.
 
-    Uses the same renderer pattern as inlaw.py's ``_render`` helper.
+    Uses the same collapsed-renderer pattern as inlaw.py's ``_render``:
+    calls ``get_relationship_distance_new`` to get the real collapsed paths
+    (with correct non-birth chars for step/adoptive edges), then renders via
+    ``get_single_relationship_string`` / ``get_sibling_relationship_string``.
+
+    The ancestor map for *anchor* is cached by the calculator's storemap across
+    calls, so the cost is dominated only by the other-person ancestor walk.
     """
     ga = anchor.get_gender()
     gb = person.get_gender()
 
     if gen_a == 1 and gen_b == 1:
-        # Sibling branch — use sibling renderer.
+        # Sibling branch — use sibling renderer (no distance needed).
         return calc.get_sibling_relationship_string(
             calc.get_sibling_type(db, anchor, person),
             ga,
             gb,
         )
 
-    # Build minimal synthetic path strings of the correct length (only birth
-    # chars).  The actual chars don't matter for the label — only the length
-    # and only_birth flag matter for the English/Russian renderers.  We use
-    # real path strings when available but for the bulk scanner we can't
-    # cheaply recover them; use synthetic ones instead.
-    path_a = _REL_MOTHER * gen_a
-    path_b = _REL_MOTHER * gen_b
-    only_birth = True  # conservative; good enough for labelling
+    # Get the real path strings via the calculator (Fix 1: correct only_birth).
+    raw, _msg = calc.get_relationship_distance_new(
+        db,
+        anchor,
+        person,
+        all_dist=True,
+        all_families=True,
+        only_birth=False,
+    )
+    if not raw or raw[0][0] == -1:
+        # Fallback: synthesize paths (should not happen given BFS found the person).
+        path_a = _REL_MOTHER * gen_a
+        path_b = _REL_MOTHER * gen_b
+        return calc.get_single_relationship_string(
+            gen_a, gen_b, ga, gb, path_a, path_b, only_birth=True
+        )
 
+    collapsed = calc.collapse_relations(raw)
+    rel = collapsed[0]
+    reltocommon_a = rel[2]
+    reltocommon_b = rel[4]
+    dist_a = len(reltocommon_a)
+    dist_b = len(reltocommon_b)
+
+    # Guard: if collapsed gives (1,1) route to sibling renderer.
+    if dist_a == 1 and dist_b == 1:
+        return calc.get_sibling_relationship_string(
+            calc.get_sibling_type(db, anchor, person),
+            ga,
+            gb,
+        )
+
+    birth = calc.only_birth(reltocommon_a) and calc.only_birth(reltocommon_b)
     return calc.get_single_relationship_string(
-        gen_a,
-        gen_b,
+        dist_a,
+        dist_b,
         ga,
         gb,
-        path_a,
-        path_b,
-        only_birth=only_birth,
+        reltocommon_a,
+        reltocommon_b,
+        only_birth=birth,
     )
 
 
@@ -485,7 +592,11 @@ def relatives_of(
     come after all blood groups.  Within a group people are sorted by birth
     date ascending (undated persons last).
     """
+    # Initialise calculator once; storemap caches anchor's ancestor map across
+    # the _label_blood calls so we only walk anchor's tree once.
     calc = get_relationship_calculator(reinit=True, clocale=locale)
+    # Enable storemap so the anchor-side BFS is computed once and reused.
+    calc.storemap = True
     anchor_handle = anchor.handle
 
     # ------------------------------------------------------------------
@@ -493,11 +604,6 @@ def relatives_of(
     # ------------------------------------------------------------------
     # Step 1: collect all ancestors with their generation distance.
     ancestor_gen: dict[str, int] = _ancestors_bfs(db, anchor)
-
-    # Step 2: also include the anchor itself so descendants of the anchor
-    # can be found (anchor as root at gen_a = 0).
-    # We'll handle the anchor's own descendants separately as a special case
-    # (gen_a = 0).
 
     # blood_map: handle → (gen_a, gen_b) using *closest* common ancestor
     blood_map: dict[str, tuple[int, int]] = {}
@@ -552,9 +658,13 @@ def relatives_of(
     # In-law relatives — bounded candidate set
     # ------------------------------------------------------------------
     # Candidates:
-    #   (a) spouses of blood relatives
-    #   (b) blood relatives of anchor's own spouses
-    #   (c) parents of spouses of anchor's children (сваты) — covered by (a)+(b)
+    #   (a) spouses of blood relatives (covers son/daughter-in-law,
+    #       brother/sister-in-law, etc.)
+    #   (b) blood relatives of anchor's own spouses (covers mother/father-
+    #       in-law, husband's brother, etc.)
+    #   (c) parents of spouses of anchor's children — сваты (Fix 2:
+    #       this is NOT covered by (a)+(b) because the path is
+    #       parent(spouse(child(anchor))) which crosses two marriages)
     blood_handles = set(blood_map.keys())
     inlaw_candidates: set[str] = set()
 
@@ -573,12 +683,12 @@ def relatives_of(
     # (b) blood relatives of anchor's spouses
     anchor_spouses = _spouses(db, anchor)
     for sp in anchor_spouses:
-        # add the spouse itself (counted as in-law via blood distance 0)
+        # add the spouse itself
         if sp.handle not in blood_handles:
             inlaw_candidates.add(sp.handle)
         # add blood relatives of the spouse
         sp_ancestors = _ancestors_bfs(db, sp)
-        for anc_h, gen_a_sp in sp_ancestors.items():
+        for anc_h in sp_ancestors:
             if anc_h not in blood_handles and anc_h != anchor_handle:
                 inlaw_candidates.add(anc_h)
             anc_p = db.get_person_from_handle(anc_h)
@@ -590,10 +700,20 @@ def relatives_of(
                     and desc_h not in blood_handles
                 ):
                     inlaw_candidates.add(desc_h)
-        # add the spouse itself's ancestors and their descendants
         for desc_h, _ in _descendants_bfs(db, sp):
             if desc_h != anchor_handle and desc_h not in blood_handles:
                 inlaw_candidates.add(desc_h)
+
+    # (c) сваты: parents of the spouse of each child of the anchor.
+    #     parent(spouse(child(anchor))) — two marriage edges, middle in between.
+    for child in _children(db, anchor):
+        for child_spouse in _spouses(db, child):
+            for parent in _parents(db, child_spouse):
+                if (
+                    parent.handle != anchor_handle
+                    and parent.handle not in blood_handles
+                ):
+                    inlaw_candidates.add(parent.handle)
 
     # Compute in-law relationships.
     inlaw_groups: dict[str, list[dict[str, Any]]] = {}
@@ -626,13 +746,11 @@ def relatives_of(
     # Assemble output — blood groups sorted by closeness, then in-law
     # ------------------------------------------------------------------
     def _closeness_key(key: str) -> int:
-        """Return approximate min(gen_a + gen_b) for a category key for sorting."""
-        handles_in_group = blood_groups.get(key, [])
-        if not handles_in_group:
+        """Return min(gen_a + gen_b) for a category key."""
+        entries = blood_groups.get(key, [])
+        if not entries:
             return 999
-        return min(
-            (e["gen_a"] or 0) + (e["gen_b"] or 0) for e in handles_in_group
-        )
+        return min((e["gen_a"] or 0) + (e["gen_b"] or 0) for e in entries)
 
     sorted_blood_keys = sorted(blood_groups.keys(), key=_closeness_key)
 
