@@ -27,7 +27,6 @@ from gramps.gen.db.base import DbReadBase
 from gramps.gen.display.place import PlaceDisplay
 from gramps.gen.errors import HandleError
 from gramps.gen.lib import Date, Event, EventType, Person, Span
-from gramps.gen.relationship import get_relationship_calculator
 from gramps.gen.utils.alive import probably_alive_range
 from gramps.gen.utils.db import (
     get_birth_or_fallback,
@@ -48,6 +47,7 @@ from .filters import apply_filter
 from .schemas import TimelineEventProfileSchema
 from ...const import NAME_FORMAT_REGEXP
 from .util import (
+    get_one_relationship,
     get_person_profile_for_object,
     get_place_profile_for_object,
     get_rating,
@@ -334,11 +334,9 @@ class Timeline:
     def add_relative(self, handle: Handle, ancestors: int = 1, offspring: int = 1):
         """Add events for a relative of the anchor person."""
         person = self.db_handle.get_person_from_handle(handle)
-        calculator = get_relationship_calculator(reinit=True, clocale=self.locale)
-        calculator.set_depth(self.depth)
-        relationship = calculator.get_one_relationship(
-            self.db_handle, self.anchor_person, person
-        )
+        relationship = get_one_relationship(
+            self.db_handle, self.anchor_person, person, self.depth, self.locale
+        )[0]
         if self.relative_filters:
             found = False
             for relative in self.relative_filters:
