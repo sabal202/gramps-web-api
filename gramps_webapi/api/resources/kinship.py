@@ -43,6 +43,7 @@ Sibling shape note (empirically verified on live tree):
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from typing import Any
 
@@ -150,16 +151,23 @@ def _birth_sort_key(db: DbReadBase, handle: str) -> tuple[int, int]:
     return (date.get_sort_value(), 0)
 
 
-def _parent_handles_set(db: DbReadBase, person: Person) -> set[str]:
-    """Return the set of all parent handles of *person* across all families."""
-    result: set[str] = set()
+def _parent_handles_ordered(db: DbReadBase, person: Person) -> list[str]:
+    """Return parent handles of *person* in stable encounter order.
+
+    Iterates ``get_parent_family_handle_list()`` and yields father then mother
+    for each family, skipping duplicates.  The result is deterministic across
+    Python runs (no set hashing) and follows father-before-mother convention.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
     for fam_h in person.get_parent_family_handle_list():
         fam = db.get_family_from_handle(fam_h)
         if fam is None:
             continue
         for ph in (fam.get_father_handle(), fam.get_mother_handle()):
-            if ph:
-                result.add(ph)
+            if ph and ph not in seen:
+                seen.add(ph)
+                result.append(ph)
     return result
 
 
@@ -278,7 +286,7 @@ def common_ancestors(
     sibling_rows = [
         row for row in closest
         if len(row[2]) == 1 and len(row[4]) == 1
-        and row[2] not in ("s",) and row[4] not in ("s",)
+        and row[2] != "s" and row[4] != "s"
         and row[2] in _REL_ANY_PARENT_CHARS and row[4] in _REL_ANY_PARENT_CHARS
     ]
     # 's'-marker rows (parentless-family siblings)
@@ -296,16 +304,12 @@ def common_ancestors(
 
     # Consolidate normal sibling rows into one entry.
     if sibling_rows:
-        # Shared parents = intersection of both persons' parent sets (Fix 3a).
-        parents_a = _parent_handles_set(db, person_a)
-        parents_b = _parent_handles_set(db, person_b)
-        shared = list(parents_a & parents_b)
-        # Preserve insertion order by sorting through the union (keeps father
-        # before mother as encountered in family handle lists).
-        ordered: list[str] = []
-        for ph in list(parents_a) + list(parents_b):
-            if ph in shared and ph not in ordered:
-                ordered.append(ph)
+        # Shared parents = person_a's ordered parents filtered to those also in
+        # person_b's parent set.  _parent_handles_ordered gives stable
+        # father-before-mother order without any set-hashing non-determinism.
+        ordered_a = _parent_handles_ordered(db, person_a)
+        set_b = set(_parent_handles_ordered(db, person_b))
+        ordered: list[str] = [ph for ph in ordered_a if ph in set_b]
         ancestors.append(
             {
                 "ancestor_handles": ordered,
@@ -314,20 +318,15 @@ def common_ancestors(
             }
         )
 
-    # Handle parentless-family 's'-marker rows.
+    # Handle parentless-family 's'-marker rows (robustness path; rare in real data).
     for row in sibling_s_rows:
-        _rank, anc_handle, _pa, _fa, _pb, _fb = row
-        # Collect parents of person_a; no common ancestor handle is available.
-        parents_a = _parent_handles_set(db, person_a)
-        parents_b = _parent_handles_set(db, person_b)
-        shared = list(parents_a & parents_b)
-        ordered2: list[str] = []
-        for ph in list(parents_a) + list(parents_b):
-            if ph in shared and ph not in ordered2:
-                ordered2.append(ph)
+        _rank, _anc_handle, _pa, _fa, _pb, _fb = row
+        ordered_a2 = _parent_handles_ordered(db, person_a)
+        set_b2 = set(_parent_handles_ordered(db, person_b))
+        ordered2: list[str] = [ph for ph in ordered_a2 if ph in set_b2]
         # Fall back to all of person_a's parents if no shared parents found.
         if not ordered2:
-            ordered2 = list(parents_a)
+            ordered2 = ordered_a2
         ancestors.append(
             {
                 "ancestor_handles": ordered2,
@@ -489,6 +488,9 @@ def _descendants_bfs(
     return list(visited.items())
 
 
+_LOG = logging.getLogger(__name__)
+
+
 def _label_blood(
     calc: RelationshipCalculator,
     db: DbReadBase,
@@ -505,8 +507,10 @@ def _label_blood(
     (with correct non-birth chars for step/adoptive edges), then renders via
     ``get_single_relationship_string`` / ``get_sibling_relationship_string``.
 
-    The ancestor map for *anchor* is cached by the calculator's storemap across
-    calls, so the cost is dominated only by the other-person ancestor walk.
+    The calculator's storemap caches the anchor-side ancestor BFS across
+    ``_label_blood`` calls, so each call only pays for the other-person walk.
+    Note: ``inlaw_relationship`` creates its own fresh calculator, so storemap
+    does not benefit in-law processing.
     """
     ga = anchor.get_gender()
     gb = person.get_gender()
@@ -519,7 +523,7 @@ def _label_blood(
             gb,
         )
 
-    # Get the real path strings via the calculator (Fix 1: correct only_birth).
+    # Get the real path strings via the calculator (correct only_birth).
     raw, _msg = calc.get_relationship_distance_new(
         db,
         anchor,
@@ -530,6 +534,11 @@ def _label_blood(
     )
     if not raw or raw[0][0] == -1:
         # Fallback: synthesize paths (should not happen given BFS found the person).
+        _LOG.warning(
+            "kinship: BFS found %s but calculator returned no relationship;"
+            " using synthetic label",
+            person.handle,
+        )
         path_a = _REL_MOTHER * gen_a
         path_b = _REL_MOTHER * gen_b
         return calc.get_single_relationship_string(
@@ -543,7 +552,7 @@ def _label_blood(
     dist_a = len(reltocommon_a)
     dist_b = len(reltocommon_b)
 
-    # Guard: if collapsed gives (1,1) route to sibling renderer.
+    # defensive: collapse_relations could disagree with the gen_a/gen_b early-return
     if dist_a == 1 and dist_b == 1:
         return calc.get_sibling_relationship_string(
             calc.get_sibling_type(db, anchor, person),
@@ -561,6 +570,20 @@ def _label_blood(
         reltocommon_b,
         only_birth=birth,
     )
+
+
+def _closeness_key(
+    key: str, blood_groups: dict[str, list[dict[str, Any]]]
+) -> int:
+    """Return the minimum (gen_a + gen_b) sum for all people in *key*'s group.
+
+    Used to sort blood-relative groups from closest to most distant.
+    Exposed at module level so unit tests can exercise it directly.
+    """
+    entries = blood_groups.get(key, [])
+    if not entries:
+        return 999
+    return min((e["gen_a"] or 0) + (e["gen_b"] or 0) for e in entries)
 
 
 def relatives_of(
@@ -745,14 +768,10 @@ def relatives_of(
     # ------------------------------------------------------------------
     # Assemble output — blood groups sorted by closeness, then in-law
     # ------------------------------------------------------------------
-    def _closeness_key(key: str) -> int:
-        """Return min(gen_a + gen_b) for a category key."""
-        entries = blood_groups.get(key, [])
-        if not entries:
-            return 999
-        return min((e["gen_a"] or 0) + (e["gen_b"] or 0) for e in entries)
-
-    sorted_blood_keys = sorted(blood_groups.keys(), key=_closeness_key)
+    sorted_blood_keys = sorted(
+        blood_groups.keys(),
+        key=lambda k: _closeness_key(k, blood_groups),
+    )
 
     groups: list[dict[str, Any]] = []
     for key in sorted_blood_keys:
