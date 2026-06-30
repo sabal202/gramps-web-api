@@ -85,6 +85,7 @@ from ..util import (
     get_db_handle,
     get_tree_from_jwt,
 )
+from .inlaw import inlaw_relationship as _inlaw_relationship
 from .marital_status import get_marital_status
 
 pd = PlaceDisplay()
@@ -1591,7 +1592,7 @@ def get_missing_media_file_handles(
     return [obj.handle for obj in objects_missing]
 
 
-def get_one_relationship(
+def _get_one_relationship_blood(
     db_handle: DbReadBase,
     person1: Person,
     person2: Person,
@@ -1828,3 +1829,31 @@ def return_304_if_unchanged(response: Response, etag: str) -> Response:
         response.status = "304"
         response.response = ""
     return response
+
+
+def get_one_relationship(
+    db_handle: DbReadBase,
+    person1: Person,
+    person2: Person,
+    depth: int,
+    locale: GrampsLocale = glocale,
+    include_inlaw: bool = True,
+) -> tuple[str, int, int]:
+    """Blood/spouse relationship, falling back to a 1-step in-law (affinal) tie.
+
+    Gramps' relationship calculator only resolves consanguineous and spousal
+    ties. When it finds nothing and ``include_inlaw`` is set, fall back to a
+    single-step affinal relationship (e.g. a sibling's spouse), which covers the
+    common in-law cases without a full affinal graph search.
+
+    For an in-law result, the two returned distances are the blood distances to
+    the marriage bridge, not common-ancestor distances, and may be ``-1`` when
+    there is no common ancestor at all.
+    """
+    result = _get_one_relationship_blood(db_handle, person1, person2, depth, locale)
+    if result[0] or not include_inlaw:
+        return result
+    inlaw = _inlaw_relationship(db_handle, person1, person2, depth, locale)
+    if inlaw is not None:
+        return inlaw
+    return result
