@@ -2665,7 +2665,7 @@ class MediaRefSimpleSchema(_Base):
         metadata={"description": "Handle of the referenced media object."},
     )
     rect = fields.List(
-        fields.Raw(),
+        fields.Float(),
         allow_none=True,
         metadata={
             "description": "Crop rectangle [left, top, right, bottom] as percentages, or null."
@@ -2718,9 +2718,12 @@ class KinshipPersonSchema(_Base):
     )
     relationship = fields.Str(
         allow_none=True,
+        dump_default=None,
         metadata={
             "description": "Localized relationship label relative to the anchor person. "
-            "Present on relative entries; absent on anchor / path / ancestor entries."
+            "Present on relative entries (people in groups); absent on anchor, "
+            "path, and ancestor entries. ``name_display`` and ``name_suffix`` are "
+            "additive extras beyond the minimal contract keys."
         },
     )
 

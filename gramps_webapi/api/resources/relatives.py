@@ -35,8 +35,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from flask import Response
+from gramps.gen.db import DbReadBase
 from gramps.gen.errors import HandleError
 from gramps.gen.lib import Person
+from gramps.gen.utils.grampslocale import GrampsLocale
 
 from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
 
@@ -60,7 +62,7 @@ from .util import get_person_profile_for_object
 
 
 def _resolve_person(
-    db: Any,
+    db: DbReadBase,
     handle_or_id: str,
 ) -> Optional[Person]:
     """Resolve a handle-or-gramps_id string to a Person, or return None.
@@ -74,26 +76,26 @@ def _resolve_person(
     except HandleError:
         pass
     # Try as gramps_id
-    person = db.get_person_from_gramps_id(handle_or_id)
-    return person  # may be None
+    return db.get_person_from_gramps_id(handle_or_id)
 
 
 def _person_payload(
-    db: Any,
+    db: DbReadBase,
     person: Person,
-    locale: Any,
+    locale: GrampsLocale,
     relationship: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a person payload dict with profile fields + media_list.
 
     Includes: handle, gramps_id, name_given, name_surname, sex, birth, death,
-    name_display, name_suffix, media_list.  If ``relationship`` is not None it
-    is added under the ``relationship`` key.
+    name_display, name_suffix, media_list.  The ``age`` arg populates
+    ``death.age`` for deceased persons (matching the rest of the app's person
+    cards).  If ``relationship`` is not None it is added under that key.
     """
     profile = get_person_profile_for_object(
         db,
         person,
-        args=[],  # light profile — no events/families/age extras
+        args=["age"],
         locale=locale,
     )
     # Attach media_list for avatar support (not included in the light profile).
@@ -115,8 +117,8 @@ class RelativesResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, RelativesSchema())
     @api_blueprint.arguments(RelativesQueryArgs, location="query")
-    def get(self, args: Dict, **kwargs: Any) -> Response:
-        """Get relatives of the home person (``?handle=`` override allowed), grouped."""
+    def get(self, args: Dict) -> Response:
+        """Get relatives of the home person (``?handle=`` override), grouped."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
 
         # Resolve anchor
@@ -190,7 +192,7 @@ class CommonAncestorsResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, CommonAncestorsSchema())
     @api_blueprint.arguments(CommonAncestorsQueryArgs, location="query")
-    def get(self, args: Dict, handle: Handle, **kwargs: Any) -> Response:
+    def get(self, args: Dict, handle: Handle) -> Response:
         """Get common ancestors of ``handle`` and home person (``?to=`` overrides)."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
 
