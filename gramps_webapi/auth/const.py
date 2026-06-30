@@ -135,3 +135,10 @@ SCOPE_RESET_PW = "reset_password"
 SCOPE_CONF_EMAIL = "confirm_email"
 SCOPE_CREATE_ADMIN = "create_admin"
 SCOPE_CREATE_OWNER = "create_owner"
+
+
+# Persistent access-token scopes (vendored from gramps-web-api PR #792)
+ACCESS_TOKEN_SCOPE_ANNIVERSARIES_ICS = "anniversaries_ics"
+ACCESS_TOKEN_SCOPES = {
+    ACCESS_TOKEN_SCOPE_ANNIVERSARIES_ICS,
+}

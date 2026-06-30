@@ -138,6 +138,8 @@ from .resources.types import (
     DefaultTypesResource,
     TypesResource,
 )
+from .resources.access_tokens import UserAccessTokenResource
+from .resources.anniversaries import AnniversariesIcsResource
 from .resources.user import (
     UserChangePasswordResource,
     UserConfirmEmailResource,
@@ -561,6 +563,18 @@ register_endpt(
 )
 # User
 register_endpt(UsersResource, "/users/", "users", tags=["Users"])
+register_endpt(
+    AnniversariesIcsResource,
+    "/anniversaries.ics",
+    "anniversaries_ics",
+    tags=["Anniversaries"],
+)
+register_endpt(
+    UserAccessTokenResource,
+    "/users/-/access-tokens/<string:scope>/",
+    "user_access_token",
+    tags=["Users"],
+)
 register_endpt(UserResource, "/users/<string:user_name>/", "user", tags=["Users"])
 register_endpt(
     UserRegisterResource,
