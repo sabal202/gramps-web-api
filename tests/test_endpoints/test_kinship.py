@@ -37,10 +37,12 @@ Verified relationships (cross-checked with /api/relations/):
   Common ancestors I0623/I0626 (full siblings):
     1 entry, ancestor_handles=[I0044, I0045], path_a=[], path_b=[]
 
-  Common ancestors I0623/I0624 (half-sibling, single common father I0044 + I0045):
-    relationship="единокровный брат", 1 entry with both parents despite half-sib label
-    (calculator returns both parents as shared because both are in the same family row)
-    — verified: common_ancestors=[I0044, I0045], path_a=[], path_b=[]
+  Common ancestors I0623/I0624 (half-sibling label, yet TWO common ancestors):
+    relationship="единокровный брат" (paternal half-brother, Raymond has mrel=Adopted)
+    The engine intersects parent-handle lists from the FAMILY record (F0017): both
+    I0044 and I0045 are the recorded father/mother regardless of the child-ref type.
+    Result (verified 2026-06-30 against live engine on example_gramps):
+      1 entry, common_ancestors=[I0044, I0045], path_a=[], path_b=[]
 
   Common ancestors I0623 (default=I0044 used as ?to=):
     relationship="отец", 1 entry, common_ancestors=[I0044], path_a=[], path_b=[]
@@ -278,7 +280,14 @@ class TestRelatives(unittest.TestCase):
         self.assertIn(WALTER_GRAMPS_ID, sibling_ids)
 
     def test_relatives_default_person_has_inlaw_group(self):
-        """I0044 (default) must have an 'inlaw' group with 43 entries."""
+        """I0044 (default) must have an 'inlaw' group with 43 entries.
+
+        The count 43 was verified against the live engine on example_gramps
+        (2026-06-30) and includes сваты (parents of spouses of children) added
+        in the kinship engine's inlaw expansion.  If this value drifts after an
+        engine change it is worth reviewing intentionally rather than just
+        updating the number blindly.
+        """
         rv = check_success(self, RELATIVES_URL + "?handle=" + DEFAULT_GRAMPS_ID)
         inlaw = next((g for g in rv["groups"] if g["kind"] == "inlaw"), None)
         self.assertIsNotNone(inlaw, "expected inlaw group")
@@ -288,6 +297,22 @@ class TestRelatives(unittest.TestCase):
         """With no ?handle=, anchor must be the tree home person (I0044)."""
         rv = check_success(self, RELATIVES_URL)
         self.assertEqual(rv["anchor"]["gramps_id"], DEFAULT_GRAMPS_ID)
+
+    # ------------------------------------------------------------------
+    # 400 branch (no ?handle= AND no home person) — needs special fixture
+    # ------------------------------------------------------------------
+
+    @unittest.skip(
+        "requires a no-default-person fixture: the test infrastructure always"
+        " loads example_gramps which has I0044 as home person, so the 400"
+        " branch (missing both ?handle= and home person) cannot be reached"
+        " in the standard setup.  To cover this, a separate test module"
+        " would need to create a tree with no home person configured."
+    )
+    def test_relatives_no_handle_no_home_person_returns_400(self):
+        """Without ?handle= and without a tree home person, endpoint must 400."""
+        # Placeholder — see skip reason above.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +459,50 @@ class TestCommonAncestors(unittest.TestCase):
         self.assertEqual(entry["path_b"], [])
 
     # ------------------------------------------------------------------
+    # Half-sibling case: I0623 ↔ I0624 Raymond ("единокровный брат")
+    # Raymond has mrel=Adopted in the child-ref but is still recorded in
+    # family F0017 alongside I0044 (father) and I0045 (mother).  The engine
+    # uses _parent_handles_ordered which reads the FAMILY's father/mother
+    # handles — both I0044 and I0045 are returned.  Intersection → 2 ancs.
+    # Verified 2026-06-30 against live engine on example_gramps.
+    # ------------------------------------------------------------------
+
+    def test_common_ancestors_half_sibling_relationship_non_null(self):
+        """I0623 ↔ I0624 (half-sibling Raymond) must return non-null relationship."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=RAYMOND_GRAMPS_ID))
+        self.assertIsNotNone(rv["relationship"])
+        self.assertIsInstance(rv["relationship"], str)
+        self.assertGreater(len(rv["relationship"]), 0)
+
+    def test_common_ancestors_half_sibling_single_entry(self):
+        """Half-sibling pair must produce exactly ONE ancestors entry."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=RAYMOND_GRAMPS_ID))
+        self.assertEqual(len(rv["ancestors"]), 1)
+
+    def test_common_ancestors_half_sibling_two_common_ancestors(self):
+        """Half-sibling pair must list TWO common ancestors (I0044 + I0045).
+
+        Although the label is 'единокровный брат' (paternal half-sibling) the
+        engine resolves ancestors by intersecting parent-handle lists from the
+        FAMILY record, not from child-ref relation types.  Both I0044 (father)
+        and I0045 (mother) are the recorded parents of family F0017, so the
+        intersection yields two ancestors.
+        """
+        rv = check_success(self, self._url(JESSE_HANDLE, to=RAYMOND_GRAMPS_ID))
+        entry = rv["ancestors"][0]
+        self.assertEqual(len(entry["common_ancestors"]), 2)
+        anc_ids = {p["gramps_id"] for p in entry["common_ancestors"]}
+        self.assertIn(LEWIS_GRAMPS_ID, anc_ids)
+        self.assertIn(LUELLA_GRAMPS_ID, anc_ids)
+
+    def test_common_ancestors_half_sibling_empty_paths(self):
+        """Half-sibling entry must have empty path_a and path_b."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=RAYMOND_GRAMPS_ID))
+        entry = rv["ancestors"][0]
+        self.assertEqual(entry["path_a"], [])
+        self.assertEqual(entry["path_b"], [])
+
+    # ------------------------------------------------------------------
     # Parent-child case: I0623 ↔ I0044 ("отец")
     # Expected: 1 entry, 1 common ancestor (I0044 himself), empty paths
     # ------------------------------------------------------------------
@@ -512,3 +581,21 @@ class TestCommonAncestors(unittest.TestCase):
             self._url(JESSE_HANDLE, to="DI5KQC3CLKWQI3I0CC"),  # I0626 handle
         )
         self.assertEqual(len(rv["ancestors"]), 1)
+
+    # ------------------------------------------------------------------
+    # Path-param contract: subject <handle> must be a RAW handle
+    # ------------------------------------------------------------------
+
+    def test_common_ancestors_subject_path_param_requires_raw_handle(self):
+        """Passing a Gramps ID (e.g. 'I0623') as the path segment returns 404.
+
+        The ?to= / ?handle= query params accept both raw handles and Gramps IDs
+        via _resolve_person().  The path param <handle> in
+        /api/people/<handle>/common-ancestors does NOT go through that fallback —
+        it is looked up directly as a raw handle, so a Gramps ID string yields 404.
+        """
+        # Use I0623 Gramps ID as the path segment — must be 404, not 200.
+        check_resource_missing(
+            self,
+            self._url(JESSE_GRAMPS_ID, to=WALTER_GRAMPS_ID),
+        )
