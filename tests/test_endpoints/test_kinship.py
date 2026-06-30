@@ -85,6 +85,7 @@ LUELLA_GRAMPS_ID = "I0045"
 # ---------------------------------------------------------------------------
 
 # Required keys on a person object inside a group (contract §3)
+# Note: 'kind' ('blood' or 'inlaw') is now per-person, not per-group.
 _PERSON_KEYS = {
     "handle",
     "gramps_id",
@@ -93,6 +94,7 @@ _PERSON_KEYS = {
     "sex",
     "media_list",
     "relationship",
+    "kind",
 }
 
 
@@ -180,10 +182,14 @@ class TestRelatives(unittest.TestCase):
         self.assertIsInstance(rv["groups"], list)
 
     def test_relatives_group_has_required_keys(self):
-        """Each group must have category_key, kind, count, and people."""
+        """Each group must have category_key, count, and people.
+
+        The group-level 'kind' was removed when in-law relatives were folded
+        into blood-equivalent category groups.  Kind is now per-person.
+        """
         rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
         for group in rv["groups"]:
-            for key in ("category_key", "kind", "count", "people"):
+            for key in ("category_key", "count", "people"):
                 self.assertIn(key, group, f"group missing key: {key}")
 
     def test_relatives_group_count_matches_people_length(self):
@@ -196,20 +202,51 @@ class TestRelatives(unittest.TestCase):
                 f"count mismatch in group '{group['category_key']}'",
             )
 
-    def test_relatives_group_kind_is_blood_or_inlaw(self):
-        """Each group's 'kind' must be 'blood' or 'inlaw'."""
+    def test_relatives_group_has_no_kind_key(self):
+        """Groups must NOT carry a top-level 'kind' key.
+
+        In-law relatives are folded into the same blood-equivalent category
+        groups; kind is now a per-person field, not a per-group field.
+        """
         rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
         for group in rv["groups"]:
-            self.assertIn(group["kind"], ("blood", "inlaw"))
+            self.assertNotIn(
+                "kind",
+                group,
+                f"group '{group['category_key']}' should not have a 'kind' key",
+            )
 
-    def test_relatives_blood_groups_precede_inlaw(self):
-        """All blood groups must appear before any inlaw group."""
+    def test_relatives_person_kind_is_blood_or_inlaw(self):
+        """Every person within a group must have 'kind' = 'blood' or 'inlaw'."""
+        rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
+        for group in rv["groups"]:
+            for person in group["people"]:
+                self.assertIn(
+                    person.get("kind"),
+                    ("blood", "inlaw"),
+                    f"person {person.get('gramps_id')} in group "
+                    f"'{group['category_key']}' has bad kind",
+                )
+
+    def test_relatives_blood_persons_precede_inlaw_within_group(self):
+        """Within each group all blood entries must appear before any inlaw entry.
+
+        Since in-laws are now merged into blood-equivalent categories, the
+        ordering guarantee is blood-first within each group rather than
+        blood-groups-before-inlaw-groups.
+        """
         rv = check_success(self, RELATIVES_URL + "?handle=" + DEFAULT_GRAMPS_ID)
-        kinds = [g["kind"] for g in rv["groups"]]
-        if "inlaw" in kinds:
-            inlaw_first = kinds.index("inlaw")
-            for kind in kinds[:inlaw_first]:
-                self.assertEqual(kind, "blood")
+        for group in rv["groups"]:
+            kinds = [p.get("kind") for p in group["people"]]
+            if "inlaw" in kinds:
+                inlaw_first = kinds.index("inlaw")
+                for kind in kinds[:inlaw_first]:
+                    self.assertEqual(
+                        kind,
+                        "blood",
+                        f"blood entry after inlaw entry in group "
+                        f"'{group['category_key']}'",
+                    )
 
     # ------------------------------------------------------------------
     # Person objects within groups
@@ -240,34 +277,38 @@ class TestRelatives(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_relatives_jesse_has_parents_group(self):
-        """I0623 must have a 'parents' blood group with 2 entries."""
+        """I0623 must have a 'parents' group with at least 2 blood entries."""
         rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
         parents = next(
             (g for g in rv["groups"] if g["category_key"] == "parents"), None
         )
         self.assertIsNotNone(parents, "expected 'parents' group")
-        self.assertEqual(parents["kind"], "blood")
-        self.assertEqual(parents["count"], 2)
+        blood_count = sum(1 for p in parents["people"] if p.get("kind") == "blood")
+        self.assertEqual(blood_count, 2)
 
     def test_relatives_jesse_has_children_group(self):
-        """I0623 must have a 'children' blood group with 2 entries."""
+        """I0623 must have a 'children' group with at least 2 blood entries."""
         rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
         children = next(
             (g for g in rv["groups"] if g["category_key"] == "children"), None
         )
         self.assertIsNotNone(children, "expected 'children' group")
-        self.assertEqual(children["kind"], "blood")
-        self.assertEqual(children["count"], 2)
+        blood_count = sum(1 for p in children["people"] if p.get("kind") == "blood")
+        self.assertEqual(blood_count, 2)
 
     def test_relatives_jesse_has_siblings_group(self):
-        """I0623 must have a 'siblings' blood group with 7 entries."""
+        """I0623 must have a 'siblings' group with exactly 7 blood entries.
+
+        The group may also include in-law siblings (brothers/sisters-in-law);
+        we assert the blood sibling count stays at 7 regardless.
+        """
         rv = check_success(self, RELATIVES_URL + "?handle=" + JESSE_GRAMPS_ID)
         siblings = next(
             (g for g in rv["groups"] if g["category_key"] == "siblings"), None
         )
         self.assertIsNotNone(siblings, "expected 'siblings' group")
-        self.assertEqual(siblings["kind"], "blood")
-        self.assertEqual(siblings["count"], 7)
+        blood_count = sum(1 for p in siblings["people"] if p.get("kind") == "blood")
+        self.assertEqual(blood_count, 7)
 
     def test_relatives_jesse_siblings_contains_walter(self):
         """I0623's siblings group must include I0626 (Walter, full brother)."""
@@ -279,19 +320,29 @@ class TestRelatives(unittest.TestCase):
         sibling_ids = {p["gramps_id"] for p in siblings["people"]}
         self.assertIn(WALTER_GRAMPS_ID, sibling_ids)
 
-    def test_relatives_default_person_has_inlaw_group(self):
-        """I0044 (default) must have an 'inlaw' group with 43 entries.
+    def test_relatives_default_person_has_inlaw_persons(self):
+        """I0044 (default) must have exactly 43 in-law persons distributed across groups.
 
-        The count 43 was verified against the live engine on example_gramps
-        (2026-06-30) and includes сваты (parents of spouses of children) added
-        in the kinship engine's inlaw expansion.  If this value drifts after an
-        engine change it is worth reviewing intentionally rather than just
-        updating the number blindly.
+        In-law relatives are now folded into blood-equivalent category groups
+        rather than a single separate 'inlaw' group.  The total count of persons
+        with kind='inlaw' must still be 43 (verified against the live engine on
+        example_gramps 2026-06-30, same candidate set as before).  If this value
+        drifts after an engine change it is worth reviewing intentionally.
         """
         rv = check_success(self, RELATIVES_URL + "?handle=" + DEFAULT_GRAMPS_ID)
-        inlaw = next((g for g in rv["groups"] if g["kind"] == "inlaw"), None)
-        self.assertIsNotNone(inlaw, "expected inlaw group")
-        self.assertEqual(inlaw["count"], 43)
+        # There must no longer be a group with category_key='inlaw'.
+        inlaw_group = next(
+            (g for g in rv["groups"] if g["category_key"] == "inlaw"), None
+        )
+        self.assertIsNone(inlaw_group, "unexpected 'inlaw' category_key group")
+        # Total inlaw persons across all groups must equal 43.
+        total_inlaw = sum(
+            1
+            for g in rv["groups"]
+            for p in g["people"]
+            if p.get("kind") == "inlaw"
+        )
+        self.assertEqual(total_inlaw, 43)
 
     def test_relatives_default_person_uses_home_person_when_no_handle(self):
         """With no ?handle=, anchor must be the tree home person (I0044)."""

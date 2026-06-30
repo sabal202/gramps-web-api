@@ -163,11 +163,12 @@ class RelativesResource(ProtectedResource, GrampsJSONEncoder):
                     locale,
                     relationship=entry["relationship"],
                 )
+                # Propagate per-person kind (blood / inlaw) to the payload.
+                payload["kind"] = entry.get("kind", "blood")
                 people_out.append(payload)
             groups.append(
                 {
                     "category_key": group["category_key"],
-                    "kind": group["kind"],
                     "count": len(people_out),
                     "people": people_out,
                 }

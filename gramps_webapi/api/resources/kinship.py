@@ -594,16 +594,22 @@ def relatives_of(
 ) -> dict[str, Any]:
     """Return all blood and in-law relatives of *anchor* grouped by category.
 
+    In-law relatives are folded into the same blood-equivalent category groups
+    rather than collected in a separate trailing "inlaw" group.  Each person
+    entry carries a ``kind`` field (``"blood"`` or ``"inlaw"``).  Within every
+    group blood entries come first (sorted by birth date ascending), then
+    in-law entries (sorted by birth date ascending).
+
     Returns::
 
         {
           "groups": [
             {
               "category_key": str,
-              "kind": "blood" | "inlaw",
               "people": [
                 {"handle": str, "relationship": str,
-                 "gen_a": int, "gen_b": int},
+                 "gen_a": int | None, "gen_b": int | None,
+                 "kind": "blood" | "inlaw"},
                 ...
               ],
             },
@@ -611,9 +617,9 @@ def relatives_of(
           ],
         }
 
-    Groups are sorted by closeness (gen_a + gen_b ascending); in-law groups
-    come after all blood groups.  Within a group people are sorted by birth
-    date ascending (undated persons last).
+    Groups are sorted by closeness (min gen_a + gen_b ascending).  Within a
+    group people are ordered: blood relatives first (birth date ascending),
+    then in-law relatives (birth date ascending).
     """
     # Initialise calculator once; storemap caches anchor's ancestor map across
     # the _label_blood calls so we only walk anchor's tree once.
@@ -658,7 +664,7 @@ def relatives_of(
         if existing is None or gen_a < existing[0] + existing[1]:
             blood_map[anc_handle] = (gen_a, 0)
 
-    # Build blood groups.
+    # Build blood groups; tag each entry with kind="blood".
     blood_groups: dict[str, list[dict[str, Any]]] = {}
     for handle, (gen_a, gen_b) in blood_map.items():
         person = db.get_person_from_handle(handle)
@@ -674,6 +680,7 @@ def relatives_of(
                 "relationship": label,
                 "gen_a": gen_a,
                 "gen_b": gen_b,
+                "kind": "blood",
             }
         )
 
@@ -738,8 +745,14 @@ def relatives_of(
                 ):
                     inlaw_candidates.add(parent.handle)
 
-    # Compute in-law relationships.
-    inlaw_groups: dict[str, list[dict[str, Any]]] = {}
+    # Compute in-law relationships and fold each into the matching blood
+    # category.  The dist_a/dist_b from inlaw_relationship map directly onto
+    # (gen_a, gen_b) for _classify:
+    #   dist_a = anchor-side blood distance to the marriage bridge
+    #   dist_b = relative-side blood distance from the marriage bridge
+    # сват/сватья return (-1, -1) — no blood-ancestor path; we force them into
+    # the "siblings" category (same generation as the anchor) with gen=(1,1) and
+    # set a sort-last marker so they appear after blood siblings.
     for cand_handle in inlaw_candidates:
         cand = db.get_person_from_handle(cand_handle)
         if cand is None:
@@ -750,44 +763,67 @@ def relatives_of(
         label, dist_a, dist_b = result
         if not label:
             continue
-        inlaw_groups.setdefault("inlaw", []).append(
+
+        # Classify the in-law into a blood-equivalent category.
+        if dist_a == -1 or dist_b == -1:
+            # сват/сватья: no common-ancestor path; force into siblings.
+            # gen_a=1, gen_b=1 keeps closeness sorting consistent with real
+            # siblings; _svat_last=True puts them after all blood siblings.
+            key = "siblings"
+            gen_a_stored: int | None = 1
+            gen_b_stored: int | None = 1
+            svat_last = True
+        else:
+            gen_a_stored = dist_a
+            gen_b_stored = dist_b
+            key = _classify(dist_a, dist_b)
+            if key == "self":
+                continue
+            svat_last = False
+
+        blood_groups.setdefault(key, []).append(
             {
                 "handle": cand_handle,
                 "relationship": label,
-                "gen_a": dist_a if dist_a != -1 else None,
-                "gen_b": dist_b if dist_b != -1 else None,
+                "gen_a": gen_a_stored,
+                "gen_b": gen_b_stored,
+                "kind": "inlaw",
+                # Internal sort key: сват/сватья must sort after in-law
+                # entries that have real gen distances.
+                "_svat_last": svat_last,
             }
         )
 
     # ------------------------------------------------------------------
-    # Sort within each group by birth date
+    # Sort within each group: blood first (birth date), then in-laws
+    # (birth date); сваты sort dead-last within in-laws.
     # ------------------------------------------------------------------
-    for entries in list(blood_groups.values()) + list(inlaw_groups.values()):
-        entries.sort(key=lambda e: _birth_sort_key(db, e["handle"]))
+    for entries in blood_groups.values():
+        entries.sort(
+            key=lambda e: (
+                e["kind"] != "blood",       # False (0) for blood, True (1) for inlaw
+                e.get("_svat_last", False), # False (0) normally; True (1) for сваты
+                _birth_sort_key(db, e["handle"]),
+            )
+        )
+        # Remove the internal sort helper key from all entries.
+        for e in entries:
+            e.pop("_svat_last", None)
 
     # ------------------------------------------------------------------
-    # Assemble output — blood groups sorted by closeness, then in-law
+    # Assemble output — groups sorted by closeness
     # ------------------------------------------------------------------
-    sorted_blood_keys = sorted(
+    sorted_keys = sorted(
         blood_groups.keys(),
         key=lambda k: _closeness_key(k, blood_groups),
     )
 
     groups: list[dict[str, Any]] = []
-    for key in sorted_blood_keys:
+    for key in sorted_keys:
         groups.append(
             {
                 "category_key": key,
-                "kind": "blood",
                 "people": blood_groups[key],
-            }
-        )
-    for key, people in inlaw_groups.items():
-        groups.append(
-            {
-                "category_key": key,
-                "kind": "inlaw",
-                "people": people,
             }
         )
 

@@ -2726,27 +2726,42 @@ class KinshipPersonSchema(_Base):
             "additive extras beyond the minimal contract keys."
         },
     )
+    kind = fields.Str(
+        allow_none=True,
+        dump_default=None,
+        metadata={
+            "description": "Kinship kind: 'blood' or 'inlaw'. "
+            "Present on relative entries (people in groups); absent on anchor, "
+            "path, and ancestor entries."
+        },
+    )
 
 
 class RelativesGroupSchema(_Base):
-    """A group of relatives sharing the same kinship category."""
+    """A group of relatives sharing the same kinship category.
+
+    In-law relatives are folded into the matching blood-equivalent category
+    rather than collected in a separate trailing group.  Each person entry
+    carries a ``kind`` field (``'blood'`` or ``'inlaw'``); within the group
+    blood relatives appear first, then in-law relatives, both sorted by birth
+    date ascending.
+    """
 
     category_key = fields.Str(
         metadata={
             "description": "Stable kinship category key (e.g. 'siblings', 'parents', "
-            "'cousins_1', 'inlaw')."
+            "'cousins_1').  In-law relatives are merged into the equivalent blood "
+            "category rather than a separate 'inlaw' group."
         },
     )
-    kind = fields.Str(
-        metadata={"description": "Kinship kind: 'blood' or 'inlaw'."},
-    )
     count = fields.Int(
-        metadata={"description": "Number of people in this group."},
+        metadata={"description": "Total number of people in this group (blood + in-law)."},
     )
     people = fields.List(
         fields.Nested(KinshipPersonSchema),
         metadata={
-            "description": "Person profiles in this group, sorted by birth date."
+            "description": "Person profiles in this group: blood relatives first "
+            "(birth date ascending), then in-law relatives (birth date ascending)."
         },
     )
 
@@ -2761,7 +2776,8 @@ class RelativesSchema(_Base):
     groups = fields.List(
         fields.Nested(RelativesGroupSchema),
         metadata={
-            "description": "Relative groups sorted by closeness (blood first, then in-law)."
+            "description": "Relative groups sorted by closeness.  Blood and in-law "
+            "relatives are merged within each category group."
         },
     )
 
