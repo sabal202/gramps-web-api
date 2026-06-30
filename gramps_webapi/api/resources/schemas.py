@@ -2825,3 +2825,19 @@ class CommonAncestorsSchema(_Base):
             "Empty when the two people are unrelated."
         },
     )
+    subject = fields.Nested(
+        KinshipPersonSchema,
+        metadata={
+            "description": "Person profile of the subject (the person identified by "
+            "the <handle> path parameter)."
+        },
+    )
+    home = fields.Nested(
+        KinshipPersonSchema,
+        allow_none=True,
+        metadata={
+            "description": "Person profile of the other endpoint: the ?to= person if "
+            "given, otherwise the tree home person. Null when no home person is set "
+            "and no ?to= was provided."
+        },
+    )

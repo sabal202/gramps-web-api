@@ -215,9 +215,16 @@ class CommonAncestorsResource(ProtectedResource, GrampsJSONEncoder):
             other = db_handle.get_default_person()
             # No home person is not an error — return null/empty result (200)
             if other is None:
+                locale = get_locale_for_language(args.get("locale"), default=True)
+                subject_payload = _person_payload(db_handle, subject, locale)
                 return self.response(
                     200,
-                    {"relationship": None, "ancestors": []},
+                    {
+                        "relationship": None,
+                        "ancestors": [],
+                        "subject": subject_payload,
+                        "home": None,
+                    },
                 )
 
         db_handle.cache_people()
@@ -268,10 +275,15 @@ class CommonAncestorsResource(ProtectedResource, GrampsJSONEncoder):
                 }
             )
 
+        subject_payload = _person_payload(db_handle, subject, locale)
+        home_payload = _person_payload(db_handle, other, locale)
+
         return self.response(
             200,
             {
                 "relationship": result["relationship"],
                 "ancestors": ancestors_out,
+                "subject": subject_payload,
+                "home": home_payload,
             },
         )

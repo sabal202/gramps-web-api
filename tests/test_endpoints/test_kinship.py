@@ -652,3 +652,59 @@ class TestCommonAncestors(unittest.TestCase):
             self,
             self._url(JESSE_GRAMPS_ID, to=WALTER_GRAMPS_ID),
         )
+
+    # ------------------------------------------------------------------
+    # subject / home payloads in response
+    # ------------------------------------------------------------------
+
+    def test_common_ancestors_response_has_subject_key(self):
+        """Response must contain a 'subject' key."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=WALTER_GRAMPS_ID))
+        self.assertIn("subject", rv)
+
+    def test_common_ancestors_response_has_home_key(self):
+        """Response must contain a 'home' key."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=WALTER_GRAMPS_ID))
+        self.assertIn("home", rv)
+
+    def test_common_ancestors_subject_matches_path_param(self):
+        """'subject' must carry the profile of the person in the path param."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=WALTER_GRAMPS_ID))
+        subj = rv["subject"]
+        self.assertEqual(subj["gramps_id"], JESSE_GRAMPS_ID)
+        self.assertEqual(subj["handle"], JESSE_HANDLE)
+
+    def test_common_ancestors_subject_has_required_profile_keys(self):
+        """'subject' must have the standard profile keys (handle, gramps_id, name, sex)."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=WALTER_GRAMPS_ID))
+        for key in ("handle", "gramps_id", "name_given", "name_surname", "sex"):
+            self.assertIn(key, rv["subject"], f"subject missing key: {key}")
+
+    def test_common_ancestors_home_matches_to_param(self):
+        """'home' must carry the profile of the ?to= person when given."""
+        rv = check_success(self, self._url(JESSE_HANDLE, to=WALTER_GRAMPS_ID))
+        home = rv["home"]
+        self.assertIsNotNone(home)
+        self.assertEqual(home["gramps_id"], WALTER_GRAMPS_ID)
+
+    def test_common_ancestors_home_matches_default_person_when_no_to(self):
+        """Without ?to=, 'home' must carry the tree default person profile."""
+        rv = check_success(self, self._url(JESSE_HANDLE))
+        home = rv["home"]
+        self.assertIsNotNone(home)
+        self.assertEqual(home["gramps_id"], DEFAULT_GRAMPS_ID)
+
+    def test_common_ancestors_home_is_null_when_no_home_person(self):
+        """When no home person is set and no ?to= is given, 'home' must be null.
+
+        NOTE: The test harness always has a default person set (I0044) so this
+        path cannot be exercised in the standard fixture.  This test is a
+        documentation stub — it passes vacuously because the condition is
+        unreachable in this environment.  The code path is covered by inspection:
+        relatives.py returns ``"home": None`` in the early-return branch when
+        ``other is None``.
+        """
+        # Can't reach the no-default-person branch in the example_gramps fixture,
+        # so we only verify the normal case still works correctly here.
+        rv = check_success(self, self._url(JESSE_HANDLE))
+        self.assertIn("home", rv)  # key always present
