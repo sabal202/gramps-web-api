@@ -15,7 +15,6 @@ are needed only for genuinely circular pairs.
 
 from marshmallow import INCLUDE, Schema, fields, validate
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -2531,27 +2530,63 @@ class VerifyQueryArgs(Schema):
     ``gramps_webapi.verify_lib`` — the single source of truth.
     """
 
-    oldage      = fields.Int(load_default=_vd["oldage"],      metadata={"description": _vh["oldage"]})
-    hwdif       = fields.Int(load_default=_vd["hwdif"],       metadata={"description": _vh["hwdif"]})
-    cspace      = fields.Int(load_default=_vd["cspace"],      metadata={"description": _vh["cspace"]})
-    cbspan      = fields.Int(load_default=_vd["cbspan"],      metadata={"description": _vh["cbspan"]})
-    yngmar      = fields.Int(load_default=_vd["yngmar"],      metadata={"description": _vh["yngmar"]})
-    oldmar      = fields.Int(load_default=_vd["oldmar"],      metadata={"description": _vh["oldmar"]})
-    oldmom      = fields.Int(load_default=_vd["oldmom"],      metadata={"description": _vh["oldmom"]})
-    yngmom      = fields.Int(load_default=_vd["yngmom"],      metadata={"description": _vh["yngmom"]})
-    yngdad      = fields.Int(load_default=_vd["yngdad"],      metadata={"description": _vh["yngdad"]})
-    olddad      = fields.Int(load_default=_vd["olddad"],      metadata={"description": _vh["olddad"]})
-    wedder      = fields.Int(load_default=_vd["wedder"],      metadata={"description": _vh["wedder"]})
-    mxchildmom  = fields.Int(load_default=_vd["mxchildmom"],  metadata={"description": _vh["mxchildmom"]})
-    mxchilddad  = fields.Int(load_default=_vd["mxchilddad"],  metadata={"description": _vh["mxchilddad"]})
-    lngwdw      = fields.Int(load_default=_vd["lngwdw"],      metadata={"description": _vh["lngwdw"]})
-    oldunm      = fields.Int(load_default=_vd["oldunm"],      metadata={"description": _vh["oldunm"]})
-    estimate_age = fields.Bool(load_default=_vd["estimate_age"], metadata={"description": _vh["estimate_age"]})
-    invdate      = fields.Bool(load_default=_vd["invdate"],      metadata={"description": _vh["invdate"]})
+    oldage = fields.Int(
+        load_default=_vd["oldage"], metadata={"description": _vh["oldage"]}
+    )
+    hwdif = fields.Int(
+        load_default=_vd["hwdif"], metadata={"description": _vh["hwdif"]}
+    )
+    cspace = fields.Int(
+        load_default=_vd["cspace"], metadata={"description": _vh["cspace"]}
+    )
+    cbspan = fields.Int(
+        load_default=_vd["cbspan"], metadata={"description": _vh["cbspan"]}
+    )
+    yngmar = fields.Int(
+        load_default=_vd["yngmar"], metadata={"description": _vh["yngmar"]}
+    )
+    oldmar = fields.Int(
+        load_default=_vd["oldmar"], metadata={"description": _vh["oldmar"]}
+    )
+    oldmom = fields.Int(
+        load_default=_vd["oldmom"], metadata={"description": _vh["oldmom"]}
+    )
+    yngmom = fields.Int(
+        load_default=_vd["yngmom"], metadata={"description": _vh["yngmom"]}
+    )
+    yngdad = fields.Int(
+        load_default=_vd["yngdad"], metadata={"description": _vh["yngdad"]}
+    )
+    olddad = fields.Int(
+        load_default=_vd["olddad"], metadata={"description": _vh["olddad"]}
+    )
+    wedder = fields.Int(
+        load_default=_vd["wedder"], metadata={"description": _vh["wedder"]}
+    )
+    mxchildmom = fields.Int(
+        load_default=_vd["mxchildmom"], metadata={"description": _vh["mxchildmom"]}
+    )
+    mxchilddad = fields.Int(
+        load_default=_vd["mxchilddad"], metadata={"description": _vh["mxchilddad"]}
+    )
+    lngwdw = fields.Int(
+        load_default=_vd["lngwdw"], metadata={"description": _vh["lngwdw"]}
+    )
+    oldunm = fields.Int(
+        load_default=_vd["oldunm"], metadata={"description": _vh["oldunm"]}
+    )
+    estimate_age = fields.Bool(
+        load_default=_vd["estimate_age"], metadata={"description": _vh["estimate_age"]}
+    )
+    invdate = fields.Bool(
+        load_default=_vd["invdate"], metadata={"description": _vh["invdate"]}
+    )
     locale = fields.Str(
         load_default=None,
         validate=validate.Length(min=1, max=5),
-        metadata={"description": "Language code for translating result messages (e.g. 'de', 'fr')."},
+        metadata={
+            "description": "Language code for translating result messages (e.g. 'de', 'fr')."
+        },
     )
 
 
@@ -2584,4 +2619,202 @@ class VerifyResultSchema(_Base):
     )
     severity = fields.Str(
         metadata={"description": "Severity level: 'error' or 'warning'."},
+    )
+
+
+# ===========================================================================
+# Kinship — /relatives/ and /people/<handle>/common-ancestors
+# ===========================================================================
+
+
+class RelativesQueryArgs(Schema):
+    """Query arguments for the /relatives/ endpoint."""
+
+    handle = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of the anchor person. "
+            "Defaults to the tree's home person when omitted."
+        },
+    )
+    locale = fields.Str(
+        load_default=None,
+        validate=validate.Length(min=1, max=5),
+        metadata={
+            "description": "Language code of the locale to use for relationship labels. "
+            "Must be a valid code from the available translations."
+        },
+    )
+
+
+class CommonAncestorsQueryArgs(Schema):
+    """Query arguments for the /people/<handle>/common-ancestors endpoint."""
+
+    to = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of the second person. "
+            "Defaults to the tree's home person when omitted."
+        },
+    )
+    locale = fields.Str(
+        load_default=None,
+        validate=validate.Length(min=1, max=5),
+        metadata={
+            "description": "Language code of the locale to use for relationship labels. "
+            "Must be a valid code from the available translations."
+        },
+    )
+
+
+class MediaRefSimpleSchema(_Base):
+    """A lightweight media reference (handle + optional crop rectangle)."""
+
+    ref = fields.Str(
+        metadata={"description": "Handle of the referenced media object."},
+    )
+    rect = fields.List(
+        fields.Float(),
+        allow_none=True,
+        metadata={
+            "description": "Crop rectangle [left, top, right, bottom] as percentages, or null."
+        },
+    )
+
+
+class KinshipPersonSchema(_Base):
+    """Person profile as returned by the kinship endpoints.
+
+    Includes standard biographical profile fields plus ``media_list`` for
+    avatar support.  The ``relationship`` field is present on relative entries
+    but absent on anchor / path / ancestor entries.
+    """
+
+    handle = fields.Str(
+        metadata={"description": "Unique handle for the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Alternate user-managed identifier for the person."},
+    )
+    name_given = fields.Str(
+        metadata={"description": "Given (first) name."},
+    )
+    name_surname = fields.Str(
+        metadata={"description": "Surname."},
+    )
+    name_display = fields.Str(
+        metadata={"description": "Full display name."},
+    )
+    name_suffix = fields.Str(
+        metadata={"description": "Name suffix."},
+    )
+    sex = fields.Str(
+        metadata={"description": "Sex of the person ('M', 'F', 'X', or 'U')."},
+    )
+    birth = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Birth event profile (or best available fallback)."},
+    )
+    death = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Death event profile (or best available fallback)."},
+    )
+    media_list = fields.List(
+        fields.Nested(MediaRefSimpleSchema),
+        metadata={
+            "description": "Media references for this person (used for avatar display)."
+        },
+    )
+    relationship = fields.Str(
+        allow_none=True,
+        dump_default=None,
+        metadata={
+            "description": "Localized relationship label relative to the anchor person. "
+            "Present on relative entries (people in groups); absent on anchor, "
+            "path, and ancestor entries. ``name_display`` and ``name_suffix`` are "
+            "additive extras beyond the minimal contract keys."
+        },
+    )
+
+
+class RelativesGroupSchema(_Base):
+    """A group of relatives sharing the same kinship category."""
+
+    category_key = fields.Str(
+        metadata={
+            "description": "Stable kinship category key (e.g. 'siblings', 'parents', "
+            "'cousins_1', 'inlaw')."
+        },
+    )
+    kind = fields.Str(
+        metadata={"description": "Kinship kind: 'blood' or 'inlaw'."},
+    )
+    count = fields.Int(
+        metadata={"description": "Number of people in this group."},
+    )
+    people = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Person profiles in this group, sorted by birth date."
+        },
+    )
+
+
+class RelativesSchema(_Base):
+    """Response schema for GET /api/relatives/."""
+
+    anchor = fields.Nested(
+        KinshipPersonSchema,
+        metadata={"description": "Profile of the anchor person (no relationship key)."},
+    )
+    groups = fields.List(
+        fields.Nested(RelativesGroupSchema),
+        metadata={
+            "description": "Relative groups sorted by closeness (blood first, then in-law)."
+        },
+    )
+
+
+class CommonAncestorEntrySchema(_Base):
+    """A single common-ancestor entry with intermediate path profiles."""
+
+    common_ancestors = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profile(s) of the common ancestor(s). "
+            "Normally one person; two for the full-sibling case (both parents)."
+        },
+    )
+    path_a = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profiles of intermediate persons on the path from the "
+            "subject person to the common ancestor (endpoints excluded)."
+        },
+    )
+    path_b = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profiles of intermediate persons on the path from the "
+            "other person to the common ancestor (endpoints excluded)."
+        },
+    )
+
+
+class CommonAncestorsSchema(_Base):
+    """Response schema for GET /api/people/<handle>/common-ancestors."""
+
+    relationship = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Localized relationship label between the subject and the other person. "
+            "Null when the two are unrelated or no other person is specified."
+        },
+    )
+    ancestors = fields.List(
+        fields.Nested(CommonAncestorEntrySchema),
+        metadata={
+            "description": "Closest common ancestor entries. "
+            "Empty when the two people are unrelated."
+        },
     )

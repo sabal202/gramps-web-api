@@ -89,6 +89,7 @@ from .resources.ocr import MediaOcrResource
 from .resources.people import PeopleResource, PersonResource
 from .resources.places import PlaceResource, PlacesResource
 from .resources.relations import RelationResource, RelationsResource
+from .resources.relatives import CommonAncestorsResource, RelativesResource
 from .resources.reports import (
     ReportFileResource,
     ReportFileResultResource,
@@ -488,6 +489,13 @@ register_endpt(
     RelationsResource,
     "/relations/<string:handle1>/<string:handle2>/all",
     "relations",
+    tags=["Relations"],
+)
+register_endpt(RelativesResource, "/relatives/", "relatives", tags=["Relations"])
+register_endpt(
+    CommonAncestorsResource,
+    "/people/<string:handle>/common-ancestors",
+    "common_ancestors",
     tags=["Relations"],
 )
 # Living
