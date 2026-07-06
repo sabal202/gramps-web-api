@@ -354,6 +354,14 @@ class PersonProfileSchema(_Base):
         EventProfileSchema,
         metadata={"description": "Birth event profile (or best available fallback)."},
     )
+    current_age = fields.Str(
+        metadata={
+            "description": "Current age if the person is presumed alive, or the "
+            "age they would be today if deceased. Absent if the birth date is "
+            "unknown, or if there's no death date and the person is implausibly "
+            "old to still be alive."
+        },
+    )
     death = fields.Nested(
         EventProfileSchema,
         metadata={"description": "Death event profile (or best available fallback)."},

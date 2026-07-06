@@ -256,6 +256,7 @@ class GrampsObjectQueryArgs(Schema):
                 "families",
                 "events",
                 "age",
+                "current_age",
                 "span",
                 "ratings",
                 "references",
@@ -263,7 +264,7 @@ class GrampsObjectQueryArgs(Schema):
             ]
         ),
         metadata={
-            "description": "Comma-delimited list of profile sections to include. 'self': name/sex/birth/death; 'families': family summaries; 'events': event list; 'age': age at events; 'span': elapsed time; 'ratings': citation count and confidence; 'references': referring objects; 'participants': event participants (people and families). Use 'all' for everything."
+            "description": "Comma-delimited list of profile sections to include. 'self': name/sex/birth/death; 'families': family summaries; 'events': event list; 'age': age at events; 'current_age': current age (or age at death); 'span': elapsed time; 'ratings': citation count and confidence; 'references': referring objects; 'participants': event participants (people and families). Use 'all' for everything."
         },
     )
     skipkeys = fields.DelimitedList(
@@ -498,6 +499,7 @@ class GrampsObjectsQueryArgs(Schema):
                 "families",
                 "events",
                 "age",
+                "current_age",
                 "span",
                 "ratings",
                 "references",
@@ -505,7 +507,7 @@ class GrampsObjectsQueryArgs(Schema):
             ]
         ),
         metadata={
-            "description": "Comma-delimited list of profile sections to include. 'self': name/sex/birth/death; 'families': family summaries; 'events': event list; 'age': age at events; 'span': elapsed time; 'ratings': citation count and confidence; 'references': referring objects; 'participants': event participants (people and families). Use 'all' for everything."
+            "description": "Comma-delimited list of profile sections to include. 'self': name/sex/birth/death; 'families': family summaries; 'events': event list; 'age': age at events; 'current_age': current age (or age at death); 'span': elapsed time; 'ratings': citation count and confidence; 'references': referring objects; 'participants': event participants (people and families). Use 'all' for everything."
         },
     )
     rules = fields.Str(
