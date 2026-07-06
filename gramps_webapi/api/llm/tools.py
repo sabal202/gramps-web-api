@@ -1088,8 +1088,11 @@ def _person_line(
     link = f"[{name}](/person/{gid})" if gid else name
     line = link + _fmt_life_dates(profile)
     # Guard against degenerate labels the relationship calculator emits for
-    # relations it has no word for (a bare "None"); partial labels are kept.
-    if relationship and relationship.strip().lower() != "none":
+    # distant relations it has no word for: it inserts a literal "None" token
+    # (e.g. "None матери супруга/супруги"). Drop the whole label in that case —
+    # the [in-law] marker and the group header still convey the relation. Clean
+    # labels are kept as-is.
+    if relationship and "none" not in relationship.strip().lower().split():
         line += f" — {relationship}"
     if kind == "inlaw":
         line += " [in-law]"
