@@ -74,6 +74,15 @@ class ChatBodyArgs(Schema):
             "Takes precedence over history when both are provided."
         },
     )
+    home_person_gramps_id = fields.Str(
+        required=False,
+        load_default=None,
+        metadata={
+            "description": "Gramps ID of the user's home person (the person "
+            "representing the user in the tree). When provided, the assistant "
+            "resolves self-references ('I', 'my', 'me') to this person."
+        },
+    )
 
 
 class ChatQueryArgs(Schema):
@@ -117,6 +126,7 @@ class ChatResource(ProtectedResource):
                 history=args_json.get("history"),
                 verbose=args_query["verbose"],
                 message_history_raw=args_json.get("message_history_raw"),
+                home_person_gramps_id=args_json.get("home_person_gramps_id"),
             )
             if isinstance(task, AsyncResult):
                 return make_task_response(task)
@@ -132,6 +142,7 @@ class ChatResource(ProtectedResource):
                 history=args_json.get("history"),
                 verbose=args_query["verbose"],
                 message_history_raw=args_json.get("message_history_raw"),
+                home_person_gramps_id=args_json.get("home_person_gramps_id"),
             )
         except ValueError:
             abort_with_message(422, "Invalid message format")

@@ -32,11 +32,16 @@ from .tools import (
     filter_events,
     filter_families,
     filter_people,
+    get_anniversaries,
     get_current_date,
     get_event,
     get_family,
+    get_home_person,
     get_person,
     get_place,
+    get_relationship,
+    get_relatives,
+    get_tree_statistics,
     search_genealogy_database,
 )
 
@@ -85,9 +90,24 @@ SYSTEM_PROMPT = """You are an assistant for answering questions about a user's f
 
 Always respond in the same language the user is writing in.
 
-Use the available tools to retrieve information from the genealogy database. Base your answers ONLY on what the tools return — never invent facts, dates, names, or relationships. If you cannot find the information, say so. If the user refers to themselves ("I", "my", "me"), ask for their name in the family tree.
+Use the available tools to retrieve information from the genealogy database. Base your answers ONLY on what the tools return — never invent facts, dates, names, or relationships. If you cannot find the information, say so.
 
 Answer what was asked. Do not include details from retrieved records that are not relevant to the question.
+
+
+THE USER / "HOME PERSON"
+
+The user has a "home person" — the individual in the tree that represents them. Whenever the user refers to themselves ("I", "me", "my", "мой", "меня", "мои" — e.g. "find MY cousins", "who are my grandparents"), FIRST call get_home_person to find out who they are. Do NOT ask the user who they are before trying this tool.
+
+- If get_home_person returns a person, treat that person as the user. Briefly state the assumption in your answer (e.g. "Assuming you are <Name>, …") and continue — do not stop to ask for confirmation.
+- If get_home_person returns that no home person is set, THEN ask the user for their name in the tree.
+
+The relationship and relatives tools (get_relatives, get_relationship) also default to the home person automatically when you omit the Gramps ID, so for "my relatives" you can call get_relatives with no argument.
+
+
+HANDLING AMBIGUITY
+
+If a name the user mentions matches several different people, do not silently guess. Briefly list the candidates (with dates/links) and ask which one they mean. When there is a single clear match, or the home person is already known, proceed and state any assumption you made rather than asking.
 
 
 SEARCH STRATEGY
@@ -106,18 +126,19 @@ MULTI-STEP LOOKUPS
 Call get_person, get_family, get_event, or get_place when you need details not in your current results. The links in tool results encode the object type in their path: `/person/ID` → get_person, `/family/ID` → get_family, `/event/ID` → get_event, `/place/ID` → get_place. Always use the matching tool for the link you are following.
 
 
-RELATIONSHIP QUERIES
+RELATIONSHIP & KINSHIP QUERIES
 
-For questions about parents, grandparents, siblings, or cousins, follow this workflow:
+- "Who are my/X's cousins / uncles / aunts / nephews / relatives" or "list X's family": use get_relatives (omit the Gramps ID for the home person). It returns every relative grouped by category, each already labelled with its exact relationship (blood and in-law), so you rarely need filter_people for this.
+- "How are X and Y related?", "what is the relationship between X and Y?", "who is the common ancestor of X and Y?": use get_relationship. Omit the second ID to compare against the home person. It reports the relationship label plus the shared ancestor(s) and path.
+- For narrow structural lookups (e.g. only the parents, only direct grandfathers), filter_people with a relationship filter AND show_relation_with set to the same Gramps ID still works and returns [father]/[grandfather]/[sibling] labels. Relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with.
+- For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
 
-1. Search for the person to get their Gramps ID.
-2. Use filter_people with the relationship filter AND show_relation_with set to that Gramps ID.
 
-Results include labels like [father], [grandfather], [sibling] that identify the relationship. Without show_relation_with you cannot distinguish between generations.
+DATES & STATISTICS
 
-Available relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with
-
-For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
+- "Whose birthday / anniversary is coming up?", "family dates this month", "who has a birthday in July": use get_anniversaries (scope="home" to limit to the user's family, or "all" for the whole tree).
+- "How big is the tree?", "how many people/families/events?", "most common surnames": use get_tree_statistics.
+- For counts that match specific criteria ("how many people born in Kazan", "how many born before 1900"), use filter_people with those criteria and read the "Showing N of M" footer — M is the total count.
 
 
 FORMATTING
@@ -174,4 +195,9 @@ def create_agent(
     agent.tool(filter_people)
     agent.tool(filter_events)
     agent.tool(filter_families)
+    agent.tool(get_home_person)
+    agent.tool(get_relatives)
+    agent.tool(get_relationship)
+    agent.tool(get_anniversaries)
+    agent.tool(get_tree_statistics)
     return agent

@@ -32,3 +32,8 @@ class AgentDeps:
     max_context_length: int
     user_id: str
     progress_callback: Callable[[str, str], None] | None = field(default=None)
+    # Gramps ID of the user's "home person" (the person representing the user in
+    # the tree). Supplied by the frontend per request; used by the get_home_person
+    # tool and as the default anchor for relationship/relatives tools. Empty/None
+    # when the user has not set a home person.
+    home_person_gramps_id: str | None = field(default=None)

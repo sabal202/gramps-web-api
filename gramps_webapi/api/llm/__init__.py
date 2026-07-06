@@ -96,6 +96,7 @@ def answer_with_agent(
     history: list | None = None,
     progress_callback: Callable[[str, str], None] | None = None,
     message_history_raw: str | None = None,
+    home_person_gramps_id: str | None = None,
 ):
     """Answer a prompt using Pydantic AI agent.
 
@@ -108,6 +109,9 @@ def answer_with_agent(
         progress_callback: Optional callback fired at the start of each tool call
         message_history_raw: Serialized message history from a previous response.
             When provided, takes precedence over history.
+        home_person_gramps_id: Optional Gramps ID of the user's home person, used
+            by the get_home_person tool and as the default anchor for the
+            relationship/relatives tools.
 
     Returns:
         AgentRunResult containing the response and metadata
@@ -138,6 +142,7 @@ def answer_with_agent(
         max_context_length=max_context_length,
         user_id=user_id,
         progress_callback=progress_callback,
+        home_person_gramps_id=home_person_gramps_id,
     )
 
     message_history: list[ModelRequest | ModelResponse] = []

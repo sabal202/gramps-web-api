@@ -12,8 +12,8 @@
 """Anniversaries ICS resource."""
 
 import json
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Optional
 
 from flask import Response
 from gramps.gen.lib import Event
@@ -212,6 +212,108 @@ def _build_ics(events: list[Event], db_handle, tree_id: str) -> str:
         lines.extend(vevent)
     lines.append("END:VCALENDAR")
     return "\r\n".join(_fold_ics_line(line) for line in lines) + "\r\n"
+
+
+def _next_anniversary_date(today: date, month: int, day: int) -> Optional[date]:
+    """Return the next date on or after *today* matching (month, day).
+
+    Handles Feb 29 in non-leap years by observing the anniversary on Mar 1.
+    """
+
+    def _make(year: int) -> Optional[date]:
+        try:
+            return date(year, month, day)
+        except ValueError:
+            if month == 2 and day == 29:
+                return date(year, 3, 1)
+            return None
+
+    occurrence = _make(today.year)
+    if occurrence is None:
+        return None
+    if occurrence < today:
+        occurrence = _make(today.year + 1)
+    return occurrence
+
+
+def upcoming_anniversaries(
+    db_handle,
+    within_days: int = 31,
+    today: Optional[date] = None,
+    event_types: Optional[list[str]] = None,
+    anchor_gramps_id: Optional[str] = None,
+    generation_depth: int = 4,
+) -> list[dict[str, Any]]:
+    """Return events whose yearly anniversary falls within the next *within_days*.
+
+    Pure helper (no Flask): iterates all events, keeps those with a valid
+    recurring (month, day) whose next occurrence is within ``[today,
+    today + within_days]``. Optionally restricts to the family scope around an
+    anchor person (ancestors/descendants within ``generation_depth``). A missing
+    anchor is ignored (whole tree) rather than raising.
+
+    Returns a list sorted by the upcoming occurrence date::
+
+        [{"date": date, "event": Event}, ...]
+    """
+    if today is None:
+        today = datetime.now().date()
+    window_end = today + timedelta(days=within_days)
+    allowed_types = {
+        event_type.casefold().strip()
+        for event_type in (event_types or [])
+        if event_type and event_type.strip()
+    }
+
+    allowed_people: Optional[set[str]] = None
+    allowed_families: Optional[set[str]] = None
+    if anchor_gramps_id:
+        anchor = db_handle.get_person_from_gramps_id(anchor_gramps_id)
+        if anchor is not None:
+            rules = {
+                "function": "or",
+                "rules": [
+                    {
+                        "name": "IsLessThanNthGenerationAncestorOf",
+                        "values": [anchor_gramps_id, generation_depth],
+                    },
+                    {
+                        "name": "IsLessThanNthGenerationDescendantOf",
+                        "values": [anchor_gramps_id, generation_depth],
+                    },
+                ],
+            }
+            handles = db_handle.get_person_handles(sort_handles=True)
+            allowed_people = set(
+                apply_filter(db_handle, {"rules": json.dumps(rules)}, "Person", handles)
+            )
+            allowed_people.add(anchor.handle)
+            allowed_families = _resolve_family_handles_for_people(
+                db_handle, allowed_people
+            )
+
+    results: list[dict[str, Any]] = []
+    for handle in db_handle.get_event_handles():
+        event = db_handle.get_event_from_handle(handle)
+        if event is None:
+            continue
+        if not _event_matches_type(event, allowed_types):
+            continue
+        components = _get_anniversary_date_components(event)
+        if components is None:
+            continue
+        _year, month, day = components
+        occurrence = _next_anniversary_date(today, month, day)
+        if occurrence is None or occurrence > window_end:
+            continue
+        if allowed_people is not None and not _is_event_in_anchor_scope(
+            db_handle, event, allowed_people, allowed_families or set()
+        ):
+            continue
+        results.append({"date": occurrence, "event": event})
+
+    results.sort(key=lambda item: (item["date"], item["event"].handle))
+    return results
 
 
 def _event_sort_key(event: Event) -> tuple[int, int, int, str]:

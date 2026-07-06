@@ -28,12 +28,19 @@ from typing import Any
 
 from pydantic_ai import RunContext
 
+from ..people_families_cache import CachePeopleFamiliesProxy
+from ..resources.anniversaries import upcoming_anniversaries
 from ..resources.filters import apply_filter
-from ..resources.util import get_one_relationship
+from ..resources.kinship import common_ancestors, relatives_of
+from ..resources.util import (
+    get_event_summary_from_object,
+    get_one_relationship,
+    get_person_profile_for_object,
+)
 from ..search import get_search_indexer, get_semantic_search_indexer
 from ..search.indexer import SearchIndexerBase
 from ..search.text import obj_strings_from_object
-from ..util import get_db_outside_request, get_logger
+from ..util import get_db_outside_request, get_locale_for_language, get_logger
 from .deps import AgentDeps
 
 
@@ -1005,3 +1012,523 @@ def filter_families(
         empty_message="No families found matching the filter criteria.",
         logic=combine_filters.lower(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Home person / kinship / anniversaries / statistics tools
+# ---------------------------------------------------------------------------
+
+
+def _tool_locale():
+    """Return the server default GrampsLocale for rendering tool output."""
+    return get_locale_for_language(None, default=True)
+
+
+def _open_db(ctx: RunContext[AgentDeps]):
+    """Open a thread-safe read-only DB handle for a tool. Caller must close it.
+
+    Uses get_db_outside_request for the same thread-safety reason as the other
+    tools (Pydantic AI runs tools in a thread pool, which would violate SQLite's
+    thread affinity if the request-cached handle were reused).
+    """
+    return get_db_outside_request(
+        tree=ctx.deps.tree,
+        view_private=ctx.deps.include_private,
+        readonly=True,
+        user_id=ctx.deps.user_id,
+    )
+
+
+def _open_cached_db(ctx: RunContext[AgentDeps]):
+    """Open a read-only handle wrapped in the people/families cache.
+
+    Returns ``(proxy, raw_handle)``. The caller MUST close ``raw_handle`` (the
+    proxy does not own the underlying connection). Wrapping
+    ``get_db_outside_request`` in ``CachePeopleFamiliesProxy`` mirrors what
+    ``RelativesResource`` does with the request handle, so the kinship BFS does
+    not re-hit the DB for every person/family lookup.
+    """
+    raw = _open_db(ctx)
+    proxy = CachePeopleFamiliesProxy(raw)
+    proxy.cache_people()
+    proxy.cache_families()
+    return proxy, raw
+
+
+def _fmt_life_dates(profile: dict[str, Any]) -> str:
+    """Return a compact ' (b. …; d. …)' suffix from a person profile, or ''."""
+
+    def _date(key: str) -> str:
+        value = profile.get(key)
+        if isinstance(value, dict):
+            return (value.get("date") or "").strip()
+        return ""
+
+    parts: list[str] = []
+    born = _date("birth")
+    died = _date("death")
+    if born:
+        parts.append(f"b. {born}")
+    if died:
+        parts.append(f"d. {died}")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
+def _person_line(
+    db_handle,
+    person,
+    locale,
+    relationship: str | None = None,
+    kind: str | None = None,
+) -> str:
+    """Render a single person as a compact markdown list entry with a link."""
+    profile = get_person_profile_for_object(db_handle, person, args=[], locale=locale)
+    name = profile.get("name_display") or profile.get("gramps_id") or "?"
+    gid = profile.get("gramps_id") or ""
+    link = f"[{name}](/person/{gid})" if gid else name
+    line = link + _fmt_life_dates(profile)
+    if relationship:
+        line += f" — {relationship}"
+    if kind == "inlaw":
+        line += " [in-law]"
+    return line
+
+
+@log_tool_call
+def get_home_person(ctx: RunContext[AgentDeps]) -> str:
+    """Identify the user's "home person" — the individual representing the user.
+
+    ALWAYS call this FIRST whenever the user refers to themselves ("I", "me",
+    "my", "мой", "меня", "мои") so you know whose relatives, ancestors, or
+    descendants they mean. Do not ask the user who they are until this tool has
+    returned no home person.
+
+    Returns:
+        The home person's full record (name, dates, families), or a note that no
+        home person is configured.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_home_person", "Identifying the home person...")
+
+    gid = (ctx.deps.home_person_gramps_id or "").strip()
+    if not gid:
+        return (
+            "No home person is set for this user. Ask the user who they are in "
+            "the family tree (their name or Gramps ID) before answering questions "
+            "about their own relatives."
+        )
+
+    logger = get_logger()
+    try:
+        db_handle = _open_db(ctx)
+        try:
+            person = db_handle.get_person_from_gramps_id(gid)
+            if person is None:
+                return (
+                    f"The configured home person (Gramps ID '{gid}') was not found "
+                    "in the tree. Ask the user to confirm who they are."
+                )
+            obj_dict = obj_strings_from_object(
+                db_handle=db_handle,
+                class_name="Person",
+                obj=person,
+                semantic=True,
+            )
+        finally:
+            db_handle.close()
+        if not obj_dict:
+            return f"The home person '{gid}' has no readable record."
+        content = (
+            obj_dict["string_all"]
+            if ctx.deps.include_private
+            else obj_dict["string_public"]
+        )
+        if not content:
+            return f"The home person '{gid}' has no readable record."
+        header = (
+            f"The user's home person (i.e. the user themselves, 'I'/'me'/'my') is "
+            f"Gramps ID {gid}. Full record:\n\n"
+        )
+        return header + _truncate_content(
+            content, min(ctx.deps.max_context_length // 2, 10000)
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error fetching home person %s: %s", gid, e)
+        return f"Error fetching the home person '{gid}': {e}"
+
+
+@log_tool_call
+def get_relatives(ctx: RunContext[AgentDeps], gramps_id: str = "") -> str:
+    """List all relatives of a person, grouped by kinship category.
+
+    This is the best tool for "who are my cousins / uncles / nephews", "list
+    X's relatives", or any request for a person's whole kinship network. It
+    returns both blood relatives and in-law (marriage) relatives, each already
+    labelled with its exact relationship (e.g. "двоюродный брат", "second
+    cousin", "aunt"). Prefer this over filter_people for relationship questions.
+
+    Args:
+        gramps_id: Gramps ID of the anchor person (e.g. "I0044"). Leave empty to
+            use the user's home person (call get_home_person first if unsure who
+            that is).
+
+    Returns:
+        Relatives grouped by category, each linked, or a note if none/unknown.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_relatives", "Finding relatives...")
+
+    gid = (gramps_id or ctx.deps.home_person_gramps_id or "").strip()
+    if not gid:
+        return (
+            "No person was specified and no home person is set. Ask the user who "
+            "they are, or provide a Gramps ID."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        anchor = db_handle.get_person_from_gramps_id(gid)
+        if anchor is None:
+            return f"No person found with Gramps ID '{gid}'."
+
+        locale = _tool_locale()
+        result = relatives_of(db_handle, anchor, locale)
+
+        anchor_line = _person_line(db_handle, anchor, locale)
+        out: list[str] = [f"Relatives of {anchor_line}:"]
+        max_length = ctx.deps.max_context_length
+        current_length = len(out[0])
+        truncated = False
+
+        for group in result["groups"]:
+            group_lines: list[str] = []
+            for entry in group["people"]:
+                person = db_handle.get_person_from_handle(entry["handle"])
+                if person is None:
+                    continue
+                if not ctx.deps.include_private and person.private:
+                    continue
+                group_lines.append(
+                    "- "
+                    + _person_line(
+                        db_handle,
+                        person,
+                        locale,
+                        relationship=entry.get("relationship"),
+                        kind=entry.get("kind"),
+                    )
+                )
+            if not group_lines:
+                continue
+            block = f"\n\n### {group['category_key']} ({len(group_lines)})\n" + "\n".join(
+                group_lines
+            )
+            if current_length + len(block) > max_length:
+                truncated = True
+                break
+            out.append(block)
+            current_length += len(block)
+
+        if len(out) == 1:
+            return f"No relatives found for {anchor_line}."
+        text = "".join(out)
+        if truncated:
+            text += "\n\n---\n(Some more distant relatives were omitted to fit the response.)"
+        return text
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error finding relatives of %s: %s", gid, e)
+        return f"Error finding relatives of '{gid}': {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_relationship(
+    ctx: RunContext[AgentDeps], gramps_id_a: str, gramps_id_b: str = ""
+) -> str:
+    """Explain how two people are related, with their common ancestor(s).
+
+    Use for "how are X and Y related?", "what is the relationship between X and
+    Y?", or "who is the common ancestor of X and Y?". Handles both blood and
+    in-law (marriage) relationships and shows the ancestral path.
+
+    Args:
+        gramps_id_a: Gramps ID of the first person (e.g. "I0044").
+        gramps_id_b: Gramps ID of the second person. Leave empty to compare
+            against the user's home person.
+
+    Returns:
+        The relationship label plus common ancestor(s) and the path between them,
+        or a note if they are unrelated / a person is unknown.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_relationship", "Computing relationship...")
+
+    a_id = (gramps_id_a or "").strip()
+    b_id = (gramps_id_b or ctx.deps.home_person_gramps_id or "").strip()
+    if not a_id:
+        return "Specify at least the first person via gramps_id_a."
+    if not b_id:
+        return (
+            "No second person specified and no home person is set. Provide "
+            "gramps_id_b, or ask the user who they are."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        person_a = db_handle.get_person_from_gramps_id(a_id)
+        if person_a is None:
+            return f"No person found with Gramps ID '{a_id}'."
+        person_b = db_handle.get_person_from_gramps_id(b_id)
+        if person_b is None:
+            return f"No person found with Gramps ID '{b_id}'."
+
+        locale = _tool_locale()
+        line_a = _person_line(db_handle, person_a, locale)
+        line_b = _person_line(db_handle, person_b, locale)
+
+        if person_a.handle == person_b.handle:
+            return f"{line_a} and {line_b} are the same person."
+
+        # Localized relationship label (blood + in-law aware). Direction:
+        # get_one_relationship(person1=B, person2=A) yields A's relationship to B.
+        rel_str = ""
+        try:
+            rel_str, _da, _db = get_one_relationship(
+                db_handle=db_handle,
+                person1=person_b,
+                person2=person_a,
+                depth=15,
+                locale=locale,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning("get_one_relationship failed for %s/%s: %s", a_id, b_id, e)
+
+        parts: list[str] = []
+        if rel_str and rel_str.strip():
+            parts.append(f"{line_a} is **{rel_str}** of {line_b}.")
+        else:
+            parts.append(
+                f"No direct relationship label was found between {line_a} and "
+                f"{line_b}."
+            )
+
+        # Common ancestor(s) + path (blood relationships only).
+        ca = common_ancestors(db_handle, person_a, person_b, locale)
+
+        def _render_people(handle_people) -> str:
+            names: list[str] = []
+            for p in handle_people:
+                if p is None:
+                    continue
+                if not ctx.deps.include_private and p.private:
+                    continue
+                names.append(_person_line(db_handle, p, locale))
+            return ", ".join(names)
+
+        rendered_any = False
+        for entry in ca.get("ancestors", []):
+            anc = [
+                db_handle.get_person_from_handle(h)
+                for h in entry.get("ancestor_handles", [])
+            ]
+            anc_text = _render_people(anc)
+            if not anc_text:
+                continue
+            rendered_any = True
+            parts.append(f"\nCommon ancestor(s): {anc_text}")
+            path_a = [
+                db_handle.get_person_from_handle(h) for h in entry.get("path_a", [])
+            ]
+            path_b = [
+                db_handle.get_person_from_handle(h) for h in entry.get("path_b", [])
+            ]
+            pa = _render_people(path_a)
+            pb = _render_people(path_b)
+            if pa:
+                parts.append(f"Path from {line_a}: {pa}")
+            if pb:
+                parts.append(f"Path from {line_b}: {pb}")
+
+        if not rendered_any and not (rel_str and rel_str.strip()):
+            parts.append(
+                "They share no common ancestor in the tree and no marriage link "
+                "was found — they appear to be unrelated within the recorded data."
+            )
+        return "\n".join(parts)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error computing relationship %s/%s: %s", a_id, b_id, e)
+        return f"Error computing the relationship between '{a_id}' and '{b_id}': {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_anniversaries(
+    ctx: RunContext[AgentDeps],
+    within_days: int = 31,
+    scope: str = "all",
+    event_types: str = "",
+) -> str:
+    """List upcoming birthdays and anniversaries (yearly-recurring events).
+
+    Use for "whose birthday is coming up?", "any anniversaries this month?", or
+    "what family dates are in July?". Matches events by their month/day recurrence
+    within the next `within_days` days.
+
+    Args:
+        within_days: How many days ahead to look (default 31, max 366).
+        scope: "all" for the whole tree, or "home" to restrict to the family
+            around the user's home person.
+        event_types: Optional comma-separated event types to include (e.g.
+            "Birth", "Marriage", "Death"). Empty = Birth and Marriage.
+
+    Returns:
+        A dated list of upcoming anniversaries with links, or a note if none.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_anniversaries", "Finding upcoming dates...")
+
+    within_days = min(max(1, within_days), 366)
+    types = [t.strip() for t in event_types.split(",") if t.strip()] or [
+        "Birth",
+        "Marriage",
+    ]
+
+    anchor_gid = None
+    scope_note = ""
+    if scope == "home":
+        anchor_gid = (ctx.deps.home_person_gramps_id or "").strip() or None
+        if anchor_gid is None:
+            scope_note = (
+                "\n\n(No home person is set, so this covers the whole tree.)"
+            )
+
+    logger = get_logger()
+    db_handle = None
+    try:
+        db_handle = _open_db(ctx)
+        results = upcoming_anniversaries(
+            db_handle,
+            within_days=within_days,
+            event_types=types,
+            anchor_gramps_id=anchor_gid,
+        )
+        if not results:
+            return (
+                f"No birthdays or anniversaries ({', '.join(types)}) in the next "
+                f"{within_days} days." + scope_note
+            )
+
+        locale = _tool_locale()
+        lines: list[str] = [
+            f"Upcoming anniversaries in the next {within_days} days:"
+        ]
+        max_length = ctx.deps.max_context_length
+        current_length = len(lines[0])
+        for item in results:
+            event = item["event"]
+            if not ctx.deps.include_private and event.private:
+                continue
+            summary = get_event_summary_from_object(db_handle, event, locale)
+            gid = event.gramps_id or ""
+            date_label = item["date"].strftime("%d %B")
+            link = f" ([details](/event/{gid}))" if gid else ""
+            line = f"- **{date_label}** — {summary}{link}"
+            if current_length + len(line) > max_length:
+                lines.append("- …(more omitted)")
+                break
+            lines.append(line)
+            current_length += len(line)
+        return "\n".join(lines) + scope_note
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error listing anniversaries: %s", e)
+        return f"Error listing anniversaries: {e}"
+    finally:
+        if db_handle is not None:
+            try:
+                db_handle.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_tree_statistics(ctx: RunContext[AgentDeps]) -> str:
+    """Return high-level counts for the family tree (people, families, etc.).
+
+    Use for "how big is the tree?", "how many people/families/events are there?",
+    or "what are the most common surnames?". For counts matching specific criteria
+    (e.g. "how many people born in Kazan"), use filter_people instead and read the
+    "Showing N of M" footer.
+
+    Returns:
+        Object counts and the most common surnames.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_tree_statistics", "Gathering statistics...")
+
+    logger = get_logger()
+    db_handle = None
+    try:
+        db_handle = _open_db(ctx)
+        counts = {
+            "people": db_handle.get_number_of_people(),
+            "families": db_handle.get_number_of_families(),
+            "events": db_handle.get_number_of_events(),
+            "places": db_handle.get_number_of_places(),
+            "sources": db_handle.get_number_of_sources(),
+            "citations": db_handle.get_number_of_citations(),
+            "repositories": db_handle.get_number_of_repositories(),
+            "media": db_handle.get_number_of_media(),
+            "notes": db_handle.get_number_of_notes(),
+        }
+        surnames = db_handle.get_surname_list() or []
+
+        lines = ["Family tree statistics:"]
+        lines.append(
+            "- People: {people}\n- Families: {families}\n- Events: {events}\n"
+            "- Places: {places}\n- Sources: {sources}\n- Citations: {citations}\n"
+            "- Repositories: {repositories}\n- Media: {media}\n- Notes: {notes}".format(
+                **counts
+            )
+        )
+        lines.append(f"- Distinct surnames: {len(surnames)}")
+
+        # Top surnames by frequency (bounded to avoid heavy scans on huge trees).
+        if counts["people"] and counts["people"] <= 20000:
+            freq: dict[str, int] = {}
+            for person in db_handle.iter_people():
+                try:
+                    surname = person.primary_name.get_surname()
+                except Exception:  # pylint: disable=broad-except
+                    surname = ""
+                if surname:
+                    freq[surname] = freq.get(surname, 0) + 1
+            top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            if top:
+                lines.append(
+                    "\nMost common surnames:\n"
+                    + "\n".join(f"- {name}: {n}" for name, n in top)
+                )
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error gathering tree statistics: %s", e)
+        return f"Error gathering tree statistics: {e}"
+    finally:
+        if db_handle is not None:
+            try:
+                db_handle.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
