@@ -1105,6 +1105,36 @@ def _person_line(
     return line
 
 
+def _marriage_note(db_handle, family, locale) -> str:
+    """Return a compact " (m. YYYY; divorced)" annotation for a marriage.
+
+    Lets the agent (and reader) tell current vs former spouses apart when a
+    person has several marriages. Empty string if nothing is recorded.
+    """
+    marriage_date = ""
+    divorced = False
+    try:
+        for event_ref in family.get_event_ref_list():
+            event = db_handle.get_event_from_handle(event_ref.ref)
+            if event is None:
+                continue
+            etype = event.get_type()
+            if etype.is_marriage():
+                date_obj = event.get_date_object()
+                if date_obj is not None and not date_obj.is_empty():
+                    marriage_date = locale.date_displayer.display(date_obj)
+            elif etype.is_divorce():
+                divorced = True
+    except Exception:  # pylint: disable=broad-except
+        return ""
+    parts = []
+    if marriage_date:
+        parts.append(f"m. {marriage_date}")
+    if divorced:
+        parts.append("divorced")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 @log_tool_call
 def get_home_person(ctx: RunContext[AgentDeps]) -> str:
     """Identify the user's "home person" — the individual representing the user.
@@ -1216,7 +1246,9 @@ def get_relatives(ctx: RunContext[AgentDeps], gramps_id: str = "") -> str:
         # relatives_of groups by blood-equivalent category and does NOT include
         # the anchor's own spouse (a spouse has no blood path). Surface direct
         # spouse(s) explicitly and first, so the agent can resolve "my wife /
-        # husband" reliably and pass their Gramps ID to other tools.
+        # husband" reliably and pass their Gramps ID to other tools. Each spouse
+        # is annotated with the marriage year and a "divorced" marker so multiple
+        # marriages (current vs former) can be told apart.
         spouse_lines: list[str] = []
         for fam_handle in anchor.get_family_handle_list():
             family = db_handle.get_family_from_handle(fam_handle)
@@ -1232,7 +1264,11 @@ def get_relatives(ctx: RunContext[AgentDeps], gramps_id: str = "") -> str:
             spouse = db_handle.get_person_from_handle(spouse_handle)
             if spouse is None or (not ctx.deps.include_private and spouse.private):
                 continue
-            spouse_lines.append("- " + _person_line(db_handle, spouse, locale))
+            spouse_lines.append(
+                "- "
+                + _person_line(db_handle, spouse, locale)
+                + _marriage_note(db_handle, family, locale)
+            )
         if spouse_lines:
             block = f"\n\n### spouse ({len(spouse_lines)})\n" + "\n".join(spouse_lines)
             out.append(block)
