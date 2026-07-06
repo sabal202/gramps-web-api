@@ -1087,7 +1087,9 @@ def _person_line(
     gid = profile.get("gramps_id") or ""
     link = f"[{name}](/person/{gid})" if gid else name
     line = link + _fmt_life_dates(profile)
-    if relationship:
+    # Guard against degenerate labels the relationship calculator emits for
+    # relations it has no word for (a bare "None"); partial labels are kept.
+    if relationship and relationship.strip().lower() != "none":
         line += f" — {relationship}"
     if kind == "inlaw":
         line += " [in-law]"
