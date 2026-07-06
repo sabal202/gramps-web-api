@@ -21,6 +21,7 @@
 """Tests for the /api/people endpoints using example_gramps."""
 
 import unittest
+from datetime import date
 from urllib.parse import quote
 
 from . import BASE_URL, get_object_count, get_test_client
@@ -1289,15 +1290,11 @@ class TestPeopleHandle(unittest.TestCase):
         rv = check_success(
             self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=current_age&precision=1"
         )
-        from datetime import date
-
         today = date.today()
         expected_years = today.year - 1906
         if (today.month, today.day) < (9, 5):
             expected_years -= 1
-        self.assertEqual(
-            rv["profile"]["current_age"], f"{expected_years} years"
-        )
+        self.assertEqual(rv["profile"]["current_age"], f"{expected_years} years")
 
     def test_get_people_handle_parameter_profile_expected_result_with_locale(self):
         """Test expected profile response for a locale."""
