@@ -31,8 +31,14 @@ from pydantic_ai import RunContext
 from ..people_families_cache import CachePeopleFamiliesProxy
 from ..resources.anniversaries import upcoming_anniversaries
 from ..resources.filters import apply_filter
-from ..resources.kinship import common_ancestors, relatives_of
+from ..resources.kinship import (
+    _ancestors_bfs,
+    _descendants_bfs,
+    common_ancestors,
+    relatives_of,
+)
 from ..resources.util import (
+    get_event_profile_for_object,
     get_event_summary_from_object,
     get_one_relationship,
     get_person_profile_for_object,
@@ -1537,3 +1543,253 @@ def get_tree_statistics(ctx: RunContext[AgentDeps]) -> str:
                 db_handle.close()
             except Exception:  # pylint: disable=broad-except
                 pass
+
+
+@log_tool_call
+def get_timeline(ctx: RunContext[AgentDeps], gramps_id: str = "") -> str:
+    """Return a chronological life timeline for a person.
+
+    Use for "tell me about X", "X's life story", "what happened to X and when".
+    Lists the person's own events (birth, education, residence, death, …) and
+    their marriages, sorted by date. Clearer than get_person for narrative
+    questions because it is ordered in time.
+
+    Args:
+        gramps_id: Gramps ID of the person. Leave empty for the home person.
+
+    Returns:
+        A dated, chronological list of the person's life events with links.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_timeline", "Building the timeline...")
+
+    gid = (gramps_id or ctx.deps.home_person_gramps_id or "").strip()
+    if not gid:
+        return (
+            "No person was specified and no home person is set. Ask the user who "
+            "they are, or provide a Gramps ID."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        person = db_handle.get_person_from_gramps_id(gid)
+        if person is None:
+            return f"No person found with Gramps ID '{gid}'."
+
+        locale = _tool_locale()
+        entries: list[tuple[int, str]] = []
+
+        def _sortval(event) -> int:
+            date_obj = event.get_date_object()
+            if date_obj is None or date_obj.is_empty():
+                return 10**18  # undated events sort last
+            return date_obj.get_sort_value()
+
+        def _event_line(event, prefix: str = "") -> str:
+            prof = get_event_profile_for_object(db_handle, event, args=[], locale=locale)
+            date_str = prof.get("date") or "?"
+            etype = prof.get("type") or ""
+            place = prof.get("place") or ""
+            egid = event.gramps_id or ""
+            text = f"- **{date_str}** — {prefix}{etype}"
+            if place:
+                text += f", {place}"
+            if egid:
+                text += f" ([event](/event/{egid}))"
+            return text
+
+        # The person's own events.
+        for event_ref in person.get_event_ref_list():
+            event = db_handle.get_event_from_handle(event_ref.ref)
+            if event is None:
+                continue
+            if not ctx.deps.include_private and event.private:
+                continue
+            entries.append((_sortval(event), _event_line(event)))
+
+        # Marriage / family events, labelled with the spouse.
+        for fam_handle in person.get_family_handle_list():
+            family = db_handle.get_family_from_handle(fam_handle)
+            if family is None:
+                continue
+            spouse_handle = family.get_mother_handle()
+            if spouse_handle == person.handle:
+                spouse_handle = family.get_father_handle()
+            spouse_note = ""
+            if spouse_handle:
+                spouse = db_handle.get_person_from_handle(spouse_handle)
+                if spouse is not None and (
+                    ctx.deps.include_private or not spouse.private
+                ):
+                    sp = get_person_profile_for_object(
+                        db_handle, spouse, args=[], locale=locale
+                    )
+                    sp_name = sp.get("name_display") or ""
+                    sp_gid = sp.get("gramps_id") or ""
+                    spouse_note = (
+                        f" [{sp_name}](/person/{sp_gid}): "
+                        if sp_gid
+                        else f"{sp_name}: "
+                    )
+            for event_ref in family.get_event_ref_list():
+                event = db_handle.get_event_from_handle(event_ref.ref)
+                if event is None:
+                    continue
+                if not ctx.deps.include_private and event.private:
+                    continue
+                entries.append((_sortval(event), _event_line(event, prefix=spouse_note)))
+
+        if not entries:
+            person_line = _person_line(db_handle, person, locale)
+            return f"No dated events found for {person_line}."
+
+        entries.sort(key=lambda item: item[0])
+        person_line = _person_line(db_handle, person, locale)
+        body = "\n".join(text for _sv, text in entries)
+        result = f"Life timeline of {person_line}:\n{body}"
+        return _truncate_content(result, ctx.deps.max_context_length)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error building timeline for %s: %s", gid, e)
+        return f"Error building the timeline for '{gid}': {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+def _generation_label(gen: int, ascending: bool) -> str:
+    """Human label for a pedigree generation (ascending=ancestors)."""
+    if ascending:
+        names = {1: "parents", 2: "grandparents", 3: "great-grandparents"}
+        return names.get(gen, f"generation {gen} up (great×{gen - 2}-grandparents)")
+    names = {1: "children", 2: "grandchildren", 3: "great-grandchildren"}
+    return names.get(gen, f"generation {gen} down (great×{gen - 2}-grandchildren)")
+
+
+def _render_pedigree(
+    ctx: RunContext[AgentDeps],
+    gramps_id: str,
+    ascending: bool,
+    generations: int,
+) -> str:
+    """Shared implementation for get_ancestors / get_descendants."""
+    generations = min(max(1, generations), 20)
+    gid = (gramps_id or ctx.deps.home_person_gramps_id or "").strip()
+    if not gid:
+        return (
+            "No person was specified and no home person is set. Ask the user who "
+            "they are, or provide a Gramps ID."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        anchor = db_handle.get_person_from_gramps_id(gid)
+        if anchor is None:
+            return f"No person found with Gramps ID '{gid}'."
+
+        locale = _tool_locale()
+        if ascending:
+            gen_map = _ancestors_bfs(db_handle, anchor)  # {handle: gen}
+            pairs = list(gen_map.items())
+        else:
+            pairs = _descendants_bfs(db_handle, anchor)  # [(handle, gen)]
+
+        by_gen: dict[int, list[str]] = {}
+        max_gen = 0
+        for handle, gen in pairs:
+            if gen > generations:
+                continue
+            person = db_handle.get_person_from_handle(handle)
+            if person is None:
+                continue
+            if not ctx.deps.include_private and person.private:
+                continue
+            by_gen.setdefault(gen, []).append(_person_line(db_handle, person, locale))
+            max_gen = max(max_gen, gen)
+
+        anchor_line = _person_line(db_handle, anchor, locale)
+        kind = "Ancestors" if ascending else "Descendants"
+        if not by_gen:
+            return f"No {kind.lower()} recorded for {anchor_line}."
+
+        out = [f"{kind} of {anchor_line} (up to {generations} generations):"]
+        max_length = ctx.deps.max_context_length
+        current = len(out[0])
+        for gen in sorted(by_gen):
+            people = sorted(by_gen[gen])
+            block = (
+                f"\n\n### {_generation_label(gen, ascending)} ({len(people)})\n"
+                + "\n".join(f"- {p}" for p in people)
+            )
+            if current + len(block) > max_length:
+                out.append("\n\n---\n(Further generations omitted to fit.)")
+                break
+            out.append(block)
+            current += len(block)
+
+        if ascending and max_gen:
+            deepest = by_gen.get(max_gen, [])
+            out.append(
+                f"\n\nFurthest known ancestor(s), {max_gen} generations back: "
+                + "; ".join(deepest)
+            )
+        return "".join(out)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error building pedigree for %s: %s", gid, e)
+        return f"Error building the pedigree for '{gid}': {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_ancestors(
+    ctx: RunContext[AgentDeps], gramps_id: str = "", generations: int = 6
+) -> str:
+    """List a person's direct ancestors, grouped by generation.
+
+    Use for "who are my ancestors", "show my pedigree / lineage N generations
+    back", "who is my furthest known ancestor". Returns only the direct ancestral
+    line (parents, grandparents, …), not collateral relatives (for those use
+    get_relatives).
+
+    Args:
+        gramps_id: Gramps ID of the person. Leave empty for the home person.
+        generations: How many generations up to include (default 6, max 20).
+
+    Returns:
+        Ancestors grouped by generation, plus the furthest known ancestor(s).
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_ancestors", "Tracing ancestors...")
+    return _render_pedigree(ctx, gramps_id, ascending=True, generations=generations)
+
+
+@log_tool_call
+def get_descendants(
+    ctx: RunContext[AgentDeps], gramps_id: str = "", generations: int = 6
+) -> str:
+    """List a person's direct descendants, grouped by generation.
+
+    Use for "who are X's descendants", "show X's descendant lineage". Returns the
+    direct descendant line (children, grandchildren, …).
+
+    Args:
+        gramps_id: Gramps ID of the person. Leave empty for the home person.
+        generations: How many generations down to include (default 6, max 20).
+
+    Returns:
+        Descendants grouped by generation.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_descendants", "Tracing descendants...")
+    return _render_pedigree(ctx, gramps_id, ascending=False, generations=generations)

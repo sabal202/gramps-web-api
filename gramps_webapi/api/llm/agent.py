@@ -32,8 +32,10 @@ from .tools import (
     filter_events,
     filter_families,
     filter_people,
+    get_ancestors,
     get_anniversaries,
     get_current_date,
+    get_descendants,
     get_event,
     get_family,
     get_home_person,
@@ -41,6 +43,7 @@ from .tools import (
     get_place,
     get_relationship,
     get_relatives,
+    get_timeline,
     get_tree_statistics,
     search_genealogy_database,
 )
@@ -131,6 +134,8 @@ RELATIONSHIP & KINSHIP QUERIES
 - "Who are my/X's cousins / uncles / aunts / nephews / relatives" or "list X's family": use get_relatives (omit the Gramps ID for the home person). It returns every relative grouped by category, each already labelled with its exact relationship (blood and in-law), so you rarely need filter_people for this.
 - "How are X and Y related?", "what is the relationship between X and Y?", "who is the common ancestor of X and Y?": use get_relationship. Omit the second ID to compare against the home person. It reports the relationship label plus the shared ancestor(s) and path.
 - For narrow structural lookups (e.g. only the parents, only direct grandfathers), filter_people with a relationship filter AND show_relation_with set to the same Gramps ID still works and returns [father]/[grandfather]/[sibling] labels. Relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with.
+- "Who are my/X's ancestors", "show my lineage/pedigree N generations back", "furthest known ancestor": use get_ancestors (omit the ID for the home person). For "X's descendants": use get_descendants. These return only the direct line, grouped by generation.
+- "Tell me about X", "X's life story", "what happened to X and when": use get_timeline — the person's events and marriages in chronological order.
 - For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
 
 
@@ -200,4 +205,7 @@ def create_agent(
     agent.tool(get_relationship)
     agent.tool(get_anniversaries)
     agent.tool(get_tree_statistics)
+    agent.tool(get_timeline)
+    agent.tool(get_ancestors)
+    agent.tool(get_descendants)
     return agent
