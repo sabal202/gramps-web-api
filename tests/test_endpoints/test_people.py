@@ -1275,6 +1275,30 @@ class TestPeopleHandle(unittest.TestCase):
         ]:
             self.assertIn(key, rv["profile"])
 
+    def test_get_people_handle_parameter_profile_current_age_not_in_all(self):
+        """current_age must NOT be included in profile=all (perf: expensive for
+        bulk list/search views that request profile=all)."""
+        rv = check_success(self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=all")
+        self.assertNotIn("current_age", rv["profile"])
+
+    def test_get_people_handle_parameter_profile_current_age_expected_result(self):
+        """current_age must be present for a deceased person when explicitly
+        requested, and equal to the 'would be alive today' span from birth."""
+        # 0PWJQCZYFXOS0HGREE = Mary Grace Elizabeth Warner (I0138),
+        # born 1906-09-05, died 1993-06-06 (see test_..._expected_result_self).
+        rv = check_success(
+            self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=current_age&precision=1"
+        )
+        from datetime import date
+
+        today = date.today()
+        expected_years = today.year - 1906
+        if (today.month, today.day) < (9, 5):
+            expected_years -= 1
+        self.assertEqual(
+            rv["profile"]["current_age"], f"{expected_years} years"
+        )
+
     def test_get_people_handle_parameter_profile_expected_result_with_locale(self):
         """Test expected profile response for a locale."""
         rv = check_success(self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=all&locale=de")
