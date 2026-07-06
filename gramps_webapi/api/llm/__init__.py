@@ -88,6 +88,175 @@ def extract_metadata_from_result(result) -> dict[str, Any]:
     return metadata
 
 
+def _build_message_history(
+    history: list | None, message_history_raw: str | None
+) -> list:
+    """Build a pydantic-ai message history from raw JSON or legacy pairs."""
+    message_history: list[ModelRequest | ModelResponse] = []
+    if message_history_raw:
+        try:
+            return ModelMessagesTypeAdapter.validate_json(message_history_raw)
+        except Exception as e:  # pylint: disable=broad-except
+            raise ValueError(f"Invalid message_history_raw: {e}") from e
+    if history:
+        for message in history:
+            if "role" not in message or "message" not in message:
+                raise ValueError(f"Invalid message format: {message}")
+            role = message["role"].lower()
+            if role in ["ai", "system", "assistant"]:
+                message_history.append(
+                    ModelResponse(parts=[TextPart(content=message["message"])])
+                )
+            elif role != "error":  # skip error messages
+                message_history.append(
+                    ModelRequest(parts=[UserPromptPart(content=message["message"])])
+                )
+    return message_history
+
+
+def _prepare_agent_run(
+    tree: str,
+    include_private: bool,
+    user_id: str,
+    history: list | None,
+    progress_callback: Callable[[str, str], None] | None,
+    message_history_raw: str | None,
+    home_person_gramps_id: str | None,
+):
+    """Build (agent, deps, message_history, usage_limits) from config + inputs."""
+    config = current_app.config
+    model_name = config.get("LLM_MODEL")
+    base_url = config.get("LLM_BASE_URL")
+    max_context_length = config.get("LLM_MAX_CONTEXT_LENGTH", 50000)
+    system_prompt_override = config.get("LLM_SYSTEM_PROMPT")
+    max_requests = config.get("LLM_MAX_REQUESTS", 15)
+    max_tokens = config.get("LLM_MAX_TOKENS", 200_000)
+
+    if not model_name:
+        raise ValueError("No LLM model specified")
+
+    agent = create_agent(
+        model_name=model_name,
+        base_url=base_url,
+        system_prompt_override=system_prompt_override,
+    )
+    deps = AgentDeps(
+        tree=tree,
+        include_private=include_private,
+        max_context_length=max_context_length,
+        user_id=user_id,
+        progress_callback=progress_callback,
+        home_person_gramps_id=home_person_gramps_id,
+    )
+    message_history = _build_message_history(history, message_history_raw)
+    usage_limits = UsageLimits(
+        request_limit=max_requests,
+        total_tokens_limit=max_tokens,
+    )
+    return agent, deps, message_history, usage_limits
+
+
+def _final_text(result) -> str:
+    """Extract the final answer text from an AgentRunResult across versions."""
+    text = getattr(result, "output", None)
+    if text is None:
+        response = getattr(result, "response", None)
+        text = getattr(response, "text", None) if response is not None else None
+    return text or ""
+
+
+async def stream_agent_events(
+    prompt: str,
+    tree: str,
+    include_private: bool,
+    user_id: str,
+    history: list | None = None,
+    message_history_raw: str | None = None,
+    home_person_gramps_id: str | None = None,
+    verbose: bool = False,
+):
+    """Async generator yielding serialisable chat events for SSE streaming.
+
+    Uses ``agent.run_stream_events`` (runs the FULL graph, so DB tools execute)
+    and yields plain dicts:
+      {"type": "delta", "text": str}          incremental answer text
+      {"type": "tool",  "name": str, "step": int}  a tool call started
+      {"type": "done",  "response": str, "message_history_raw": str,
+                        "metadata": dict?}    final result (metadata if verbose)
+      {"type": "error", "message": str}       failure
+    """
+    from pydantic_ai import AgentRunResultEvent
+    from pydantic_ai.messages import (
+        FunctionToolCallEvent,
+        PartDeltaEvent,
+        PartStartEvent,
+        TextPart,
+        TextPartDelta,
+    )
+
+    logger = get_logger()
+    try:
+        agent, deps, message_history, usage_limits = _prepare_agent_run(
+            tree=tree,
+            include_private=include_private,
+            user_id=user_id,
+            history=history,
+            progress_callback=None,
+            message_history_raw=message_history_raw,
+            home_person_gramps_id=home_person_gramps_id,
+        )
+    except ValueError as e:
+        yield {"type": "error", "message": str(e)}
+        return
+
+    step = 0
+    try:
+        async with agent.run_stream_events(
+            prompt,
+            deps=deps,
+            message_history=message_history,
+            usage_limits=usage_limits,
+        ) as stream:
+            async for event in stream:
+                if isinstance(event, PartStartEvent):
+                    part = getattr(event, "part", None)
+                    if isinstance(part, TextPart) and part.content:
+                        yield {"type": "delta", "text": part.content}
+                elif isinstance(event, PartDeltaEvent):
+                    delta = getattr(event, "delta", None)
+                    if isinstance(delta, TextPartDelta) and delta.content_delta:
+                        yield {"type": "delta", "text": delta.content_delta}
+                elif isinstance(event, FunctionToolCallEvent):
+                    step += 1
+                    part = getattr(event, "part", None)
+                    name = getattr(part, "tool_name", "") or ""
+                    yield {"type": "tool", "name": name, "step": step}
+                elif isinstance(event, AgentRunResultEvent):
+                    result = event.result
+                    done: dict[str, Any] = {
+                        "type": "done",
+                        "response": sanitize_answer(_final_text(result)),
+                        "message_history_raw": ModelMessagesTypeAdapter.dump_json(
+                            result.all_messages()
+                        ).decode(),
+                    }
+                    if verbose:
+                        done["metadata"] = extract_metadata_from_result(result)
+                    yield done
+    except UsageLimitExceeded as e:
+        logger.warning("Agent usage limit exceeded (stream): %s", e)
+        yield {
+            "type": "error",
+            "message": "The AI agent exceeded its usage limits for this request.",
+        }
+    except (UnexpectedModelBehavior, ModelRetry) as e:
+        logger.error("Pydantic AI error (stream): %s", e)
+        yield {"type": "error", "message": "Error communicating with the AI model"}
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Unexpected error in stream agent: %s", e)
+        yield {"type": "error", "message": "Unexpected error."}
+
+
 def answer_with_agent(
     prompt: str,
     tree: str,
@@ -118,58 +287,14 @@ def answer_with_agent(
     """
     logger = get_logger()
 
-    # Get configuration
-    config = current_app.config
-    model_name = config.get("LLM_MODEL")
-    base_url = config.get("LLM_BASE_URL")
-    max_context_length = config.get("LLM_MAX_CONTEXT_LENGTH", 50000)
-    system_prompt_override = config.get("LLM_SYSTEM_PROMPT")
-    max_requests = config.get("LLM_MAX_REQUESTS", 15)
-    max_tokens = config.get("LLM_MAX_TOKENS", 200_000)
-
-    if not model_name:
-        raise ValueError("No LLM model specified")
-
-    agent = create_agent(
-        model_name=model_name,
-        base_url=base_url,
-        system_prompt_override=system_prompt_override,
-    )
-
-    deps = AgentDeps(
+    agent, deps, message_history, usage_limits = _prepare_agent_run(
         tree=tree,
         include_private=include_private,
-        max_context_length=max_context_length,
         user_id=user_id,
+        history=history,
         progress_callback=progress_callback,
+        message_history_raw=message_history_raw,
         home_person_gramps_id=home_person_gramps_id,
-    )
-
-    message_history: list[ModelRequest | ModelResponse] = []
-    if message_history_raw:
-        try:
-            message_history = ModelMessagesTypeAdapter.validate_json(message_history_raw)
-        except Exception as e:  # pylint: disable=broad-except
-            raise ValueError(f"Invalid message_history_raw: {e}") from e
-    elif history:
-        for message in history:
-            if "role" not in message or "message" not in message:
-                raise ValueError(f"Invalid message format: {message}")
-            role = message["role"].lower()
-            if role in ["ai", "system", "assistant"]:
-                message_history.append(
-                    ModelResponse(
-                        parts=[TextPart(content=message["message"])],
-                    )
-                )
-            elif role != "error":  # skip error messages
-                message_history.append(
-                    ModelRequest(parts=[UserPromptPart(content=message["message"])])
-                )
-
-    usage_limits = UsageLimits(
-        request_limit=max_requests,
-        total_tokens_limit=max_tokens,
     )
 
     try:

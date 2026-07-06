@@ -19,6 +19,10 @@
 
 """AI chat endpoint."""
 
+import asyncio
+import json
+
+from flask import Response, stream_with_context
 from flask_jwt_extended import get_jwt_identity
 from marshmallow import Schema, validate
 from webargs import fields
@@ -27,6 +31,7 @@ from ..util import (
     get_tree_from_jwt_or_fail,
     abort_with_message,
     check_quota_ai,
+    get_logger,
     update_usage_ai,
 )
 from ..blueprint import api_blueprint
@@ -149,3 +154,79 @@ class ChatResource(ProtectedResource):
 
         update_usage_ai(new=1)
         return result
+
+
+class ChatStreamResource(ProtectedResource):
+    """Streaming AI chat resource — Server-Sent Events (text/event-stream).
+
+    Runs the agent in the web process (not Celery) via run_stream_events so
+    answer text and tool-call events are streamed to the client in real time.
+    Emits ``data: {json}\\n\\n`` frames of type delta / tool / done / error.
+    """
+
+    @api_blueprint.arguments(ChatBodyArgs, location="json")
+    def post(self, args_json) -> Response:
+        """Stream a chat response as Server-Sent Events."""
+        require_permissions({PERM_USE_CHAT})
+        check_quota_ai(requested=1)
+        tree = get_tree_from_jwt_or_fail()
+        user_id = get_jwt_identity()
+        include_private = has_permissions({PERM_VIEW_PRIVATE})
+
+        query = args_json["query"]
+        history = args_json.get("history")
+        message_history_raw = args_json.get("message_history_raw")
+        home_person_gramps_id = args_json.get("home_person_gramps_id")
+
+        # Imported lazily so the chat module loads without AI deps installed.
+        from ..llm import stream_agent_events
+
+        def generate():
+            loop = asyncio.new_event_loop()
+            agen = stream_agent_events(
+                prompt=query,
+                tree=tree,
+                include_private=include_private,
+                user_id=user_id,
+                history=history,
+                message_history_raw=message_history_raw,
+                home_person_gramps_id=home_person_gramps_id,
+                verbose=True,
+            )
+            completed = False
+            try:
+                while True:
+                    try:
+                        event = loop.run_until_complete(agen.__anext__())
+                    except StopAsyncIteration:
+                        break
+                    if event.get("type") == "done":
+                        completed = True
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as e:  # pylint: disable=broad-except
+                get_logger().error("Chat stream error: %s", e)
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {"type": "error", "message": "Unexpected error."},
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+            finally:
+                try:
+                    loop.run_until_complete(agen.aclose())
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                loop.close()
+                if completed:
+                    try:
+                        update_usage_ai(new=1)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
