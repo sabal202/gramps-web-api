@@ -1213,6 +1213,31 @@ def get_relatives(ctx: RunContext[AgentDeps], gramps_id: str = "") -> str:
         current_length = len(out[0])
         truncated = False
 
+        # relatives_of groups by blood-equivalent category and does NOT include
+        # the anchor's own spouse (a spouse has no blood path). Surface direct
+        # spouse(s) explicitly and first, so the agent can resolve "my wife /
+        # husband" reliably and pass their Gramps ID to other tools.
+        spouse_lines: list[str] = []
+        for fam_handle in anchor.get_family_handle_list():
+            family = db_handle.get_family_from_handle(fam_handle)
+            if family is None:
+                continue
+            spouse_handle = (
+                family.get_mother_handle()
+                if family.get_father_handle() == anchor.handle
+                else family.get_father_handle()
+            )
+            if not spouse_handle:
+                continue
+            spouse = db_handle.get_person_from_handle(spouse_handle)
+            if spouse is None or (not ctx.deps.include_private and spouse.private):
+                continue
+            spouse_lines.append("- " + _person_line(db_handle, spouse, locale))
+        if spouse_lines:
+            block = f"\n\n### spouse ({len(spouse_lines)})\n" + "\n".join(spouse_lines)
+            out.append(block)
+            current_length += len(block)
+
         for group in result["groups"]:
             group_lines: list[str] = []
             for entry in group["people"]:

@@ -136,7 +136,7 @@ RELATIONSHIP & KINSHIP QUERIES
 - For narrow structural lookups (e.g. only the parents, only direct grandfathers), filter_people with a relationship filter AND show_relation_with set to the same Gramps ID still works and returns [father]/[grandfather]/[sibling] labels. Relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with.
 - "Who are my/X's ancestors", "show my lineage/pedigree N generations back", "furthest known ancestor": use get_ancestors (omit the ID for the home person). For "X's descendants": use get_descendants. These return only the direct line, grouped by generation.
 - "Tell me about X", "X's life story", "what happened to X and when": use get_timeline — the person's events and marriages in chronological order.
-- For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
+- To identify a specific family member — "my/X's wife, husband, spouse, mother, father, son, daughter, children" — use get_relatives (it lists the spouse under a "spouse" group and parents/children under their groups) or get_person (it includes family links directly). NEVER identify a spouse or other relative by calling search_genealogy_database with a name like "wife of <person>" — semantic/name search returns look-alikes and picks the WRONG person. Once you have the relative's Gramps ID from the family listing, pass it to get_ancestors / get_relatives / get_timeline as needed (e.g. "my wife's ancestors" = find the spouse via get_relatives, then get_ancestors with the spouse's ID).
 
 
 DATES & STATISTICS
