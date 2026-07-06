@@ -26,10 +26,13 @@ from unittest.mock import MagicMock, patch
 
 from gramps_webapi.api.llm.deps import AgentDeps
 from gramps_webapi.api.llm.tools import (
+    get_ancestors,
     get_anniversaries,
+    get_descendants,
     get_home_person,
     get_relationship,
     get_relatives,
+    get_timeline,
     get_tree_statistics,
 )
 from gramps_webapi.api.resources.anniversaries import (
@@ -264,6 +267,65 @@ class TestGetTreeStatistics(unittest.TestCase):
         self.assertIn("People:", result)
         self.assertIn("Families:", result)
         self.assertIn("surnames", result.lower())
+
+
+class TestGetTimeline(unittest.TestCase):
+    """Tests for the get_timeline tool."""
+
+    def _run(self, ctx, **kwargs):
+        with TEST_APP.app_context():
+            return get_timeline(ctx, **kwargs)
+
+    def test_no_anchor_no_home(self):
+        result = self._run(_ctx(home=None))
+        self.assertIn("no home person", result.lower())
+
+    def test_invalid_id(self):
+        result = self._run(_ctx(), gramps_id="I-NOPE")
+        self.assertIn("No person found", result)
+
+    @unittest.skipIf(HOME_GID is None, "example tree has no default person")
+    def test_timeline_of_home_person(self):
+        result = self._run(_ctx(home=HOME_GID))
+        self.assertNotIn("Error", result)
+        # Either a timeline or an explicit "no dated events" note.
+        self.assertTrue("timeline" in result.lower() or "no dated" in result.lower())
+
+
+class TestGetPedigree(unittest.TestCase):
+    """Tests for the get_ancestors / get_descendants tools."""
+
+    def _anc(self, ctx, **kwargs):
+        with TEST_APP.app_context():
+            return get_ancestors(ctx, **kwargs)
+
+    def _desc(self, ctx, **kwargs):
+        with TEST_APP.app_context():
+            return get_descendants(ctx, **kwargs)
+
+    def test_ancestors_no_anchor_no_home(self):
+        result = self._anc(_ctx(home=None))
+        self.assertIn("no home person", result.lower())
+
+    def test_ancestors_invalid_id(self):
+        result = self._anc(_ctx(), gramps_id="I-NOPE")
+        self.assertIn("No person found", result)
+
+    @unittest.skipIf(HOME_GID is None, "example tree has no default person")
+    def test_ancestors_of_home_person(self):
+        result = self._anc(_ctx(home=HOME_GID), generations=4)
+        self.assertNotIn("Error", result)
+        self.assertTrue(
+            "Ancestors of" in result or "No ancestors" in result
+        )
+
+    @unittest.skipIf(HOME_GID is None, "example tree has no default person")
+    def test_descendants_of_home_person(self):
+        result = self._desc(_ctx(home=HOME_GID), generations=4)
+        self.assertNotIn("Error", result)
+        self.assertTrue(
+            "Descendants of" in result or "No descendants" in result
+        )
 
 
 if __name__ == "__main__":
