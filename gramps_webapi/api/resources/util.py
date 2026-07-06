@@ -55,6 +55,7 @@ from gramps.gen.lib import (
     Source,
     Span,
 )
+from gramps.gen.lib.date import Today
 
 # from gramps.gen.lib.serialize import to_json
 from gramps.gen.lib.json_utils import object_to_dict, object_to_string, remove_object
@@ -63,6 +64,7 @@ from gramps.gen.plug import BasePluginManager
 from gramps.gen.relationship import get_relationship_calculator
 from gramps.gen.soundex import soundex
 from gramps.gen.user import User
+from gramps.gen.utils.alive import probably_alive
 from gramps.gen.utils.db import (
     get_birth_or_fallback,
     get_death_or_fallback,
@@ -699,6 +701,19 @@ def get_person_profile_for_object(
         ),
         "name_suffix": person.primary_name.get_suffix(),
     }
+    if "current_age" in args:
+        # Deceased -> always compute "would be N today" (we know they're not
+        # alive, so no need for the probably_alive() heuristic). Living/no
+        # death event -> only compute if probably_alive() agrees, so an
+        # implausibly old undated ancestor doesn't get a bogus "current age".
+        if birth_event is not None and (
+            death_event is not None or probably_alive(person, db_handle)
+        ):
+            profile["current_age"] = (
+                Span(birth_event.date, Today())
+                .format(precision=precision, dlocale=locale)
+                .strip("()")
+            )
     if "all" in args or "span" in args:
         options.append("span")
     if "all" in args or "events" in args:
