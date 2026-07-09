@@ -79,9 +79,34 @@ def count_unique_surnames(surname_list):
     """Count distinct surnames after collapsing masculine/feminine gender forms.
 
     ``surname_list`` is the raw list of surname strings from
-    ``db.get_surname_list()`` (already patronymic-free — it is the first surname
-    of each person). Returns the number of distinct gender-normalized surnames.
+    ``db.get_surname_list()`` — the first surname of each person. This is fast
+    but may include stray patronymics (people whose only/first surname is an
+    отчество); prefer :func:`count_unique_family_surnames` for an accurate count.
+    Returns the number of distinct gender-normalized surnames.
     """
     return len(
         {normalize_surname_gender(s) for s in surname_list if s and s.strip()}
     )
+
+
+def count_unique_family_surnames(db, max_scan=20000):
+    """Count distinct family surnames in the database, accurately.
+
+    Iterates people and uses :func:`get_family_surname` (patronymic excluded)
+    collapsed to the masculine base, so отчества stored as a person's only/first
+    surname are not miscounted and gender forms count once. Falls back to the
+    cheaper (and slightly looser) ``get_surname_list()`` based count on trees
+    larger than ``max_scan`` people to avoid a full scan on huge databases.
+    """
+    try:
+        n_people = db.get_number_of_people()
+    except Exception:  # pylint: disable=broad-except
+        n_people = 0
+    if n_people and n_people <= max_scan:
+        seen = set()
+        for person in db.iter_people():
+            surname = normalize_surname_gender(get_family_surname(person.primary_name))
+            if surname:
+                seen.add(surname)
+        return len(seen)
+    return count_unique_surnames(db.get_surname_list() or [])
