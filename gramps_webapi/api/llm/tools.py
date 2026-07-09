@@ -1537,13 +1537,19 @@ def get_anniversaries(
 
 
 @log_tool_call
-def get_tree_statistics(ctx: RunContext[AgentDeps]) -> str:
+def get_tree_statistics(ctx: RunContext[AgentDeps], top_surnames: int = 10) -> str:
     """Return high-level counts for the family tree (people, families, etc.).
 
     Use for "how big is the tree?", "how many people/families/events are there?",
     or "what are the most common surnames?". For counts matching specific criteria
     (e.g. "how many people born in Kazan"), use filter_people instead and read the
     "Showing N of M" footer.
+
+    Args:
+        top_surnames: How many of the most common surnames to list. Defaults to
+            10; raise it when the user asks for more (e.g. "top 25 surnames" ->
+            25). Clamped to 1..200 and never exceeds the number of distinct
+            surnames in the tree.
 
     Returns:
         Object counts and the most common surnames.
@@ -1588,7 +1594,8 @@ def get_tree_statistics(ctx: RunContext[AgentDeps]) -> str:
                     surname = ""
                 if surname:
                     freq[surname] = freq.get(surname, 0) + 1
-            top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            limit = max(1, min(int(top_surnames or 10), 200))
+            top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
             if top:
                 lines.append(
                     "\nMost common surnames:\n"
