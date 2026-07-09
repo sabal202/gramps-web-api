@@ -125,7 +125,11 @@ class ImmichClient:
             assets = data.get("assets", {})
             for item in assets.get("items", []):
                 yield item
-            page = assets.get("nextPage")
+            # ⚠️ Immich returns ``nextPage`` as a STRING (e.g. "2"); the search
+            # endpoint then rejects it as ``page`` ("expected number, received
+            # string"). Coerce back to int so pagination past page 1 works.
+            next_page = assets.get("nextPage")
+            page = int(next_page) if next_page is not None else None
 
     def album_assets(self, album_id: str) -> Iterator[dict[str, Any]]:
         """Yield every asset in an album via ``POST /search/metadata``.
