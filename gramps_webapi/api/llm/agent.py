@@ -29,12 +29,17 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from .deps import AgentDeps
 from .tools import (
+    analyze_lineages,
+    analyze_tree_connectivity,
+    check_tree_integrity,
     filter_events,
     filter_families,
     filter_people,
+    find_key_people,
     get_ancestors,
     get_anniversaries,
     get_current_date,
+    get_deepest_ancestors,
     get_descendants,
     get_event,
     get_family,
@@ -146,6 +151,15 @@ DATES & STATISTICS
 - For counts that match specific criteria ("how many people born in Kazan", "how many born before 1900"), use filter_people with those criteria and read the "Showing N of M" footer — M is the total count.
 
 
+STRUCTURE & HEALTH OF THE TREE
+
+- "islands / disconnected people / orphans / is the tree all connected?": use analyze_tree_connectivity.
+- "my deepest/highest/furthest ancestors, by lineage line": use get_deepest_ancestors (distinct from get_ancestors, which just lists generations). Omit the ID for the home person.
+- "the tree's lineages / root ancestors / brick walls / how deep does each line go": use analyze_lineages.
+- "data problems / broken records / why is someone's chart empty": use check_tree_integrity.
+- "key / central / bridge people in the tree": use find_key_people (metric = betweenness | closeness | degree | articulation).
+
+
 FORMATTING
 
 Use Markdown freely. When tool results contain links like [Name](/person/I0044), include them in your response exactly as they appear — never modify the path and never drop the link. Every person, family, event, place, source, citation, repository, note, and media object should be linked."""
@@ -208,4 +222,9 @@ def create_agent(
     agent.tool(get_timeline)
     agent.tool(get_ancestors)
     agent.tool(get_descendants)
+    agent.tool(analyze_tree_connectivity)
+    agent.tool(get_deepest_ancestors)
+    agent.tool(analyze_lineages)
+    agent.tool(check_tree_integrity)
+    agent.tool(find_key_people)
     return agent
