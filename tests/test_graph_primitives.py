@@ -1,5 +1,6 @@
 """Pure unit tests for graph_primitives (no gi required)."""
 from gramps_webapi.api.resources.graph_primitives import (
+    articulation_points,
     connected_components,
     degree_centrality,
 )
@@ -23,3 +24,15 @@ def test_degree_centrality_ranks_hub():
     ranked = degree_centrality(adj)          # list[(node, degree)] desc
     assert ranked[0] == ("h", 3)
     assert {n for n, _ in ranked} == {"h", "a", "b", "c"}
+
+
+def test_articulation_points_finds_cut_vertex():
+    # a-b-c-d chain: b and c are cut vertices; a,d are leaves
+    adj = {"a": {"b"}, "b": {"a", "c"}, "c": {"b", "d"}, "d": {"c"}}
+    aps = articulation_points(adj)
+    assert aps == {"b", "c"}
+
+
+def test_articulation_points_none_in_cycle():
+    adj = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
+    assert articulation_points(adj) == set()

@@ -43,3 +43,52 @@ def degree_centrality(adj: Adjacency) -> list[tuple[Hashable, int]]:
         ((n, len(adj.get(n, ()))) for n in adj),
         key=lambda kv: (-kv[1], str(kv[0])),
     )
+
+
+def articulation_points(adj: Adjacency) -> set[Hashable]:
+    """Return the set of articulation points (cut vertices) of an undirected graph.
+
+    Iterative Tarjan lowlink over each component. A node whose removal increases
+    the component count. Handles forests (multiple roots).
+    """
+    disc: dict[Hashable, int] = {}
+    low: dict[Hashable, int] = {}
+    parent: dict[Hashable, Hashable | None] = {}
+    ap: set[Hashable] = set()
+    timer = 0
+
+    for root in adj:
+        if root in disc:
+            continue
+        # Iterative DFS. Stack holds (node, iterator over neighbours).
+        parent[root] = None
+        stack: list[tuple[Hashable, "iter"]] = [(root, iter(adj.get(root, ())))]
+        disc[root] = low[root] = timer
+        timer += 1
+        root_children = 0
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nb in it:
+                if nb not in disc:
+                    if node == root:
+                        root_children += 1
+                    parent[nb] = node
+                    disc[nb] = low[nb] = timer
+                    timer += 1
+                    stack.append((nb, iter(adj.get(nb, ()))))
+                    advanced = True
+                    break
+                elif nb != parent.get(node):
+                    low[node] = min(low[node], disc[nb])
+            if not advanced:
+                stack.pop()
+                if stack:
+                    par = stack[-1][0]
+                    low[par] = min(low[par], low[node])
+                    # non-root articulation condition
+                    if parent.get(par) is not None and low[node] >= disc[par]:
+                        ap.add(par)
+        if root_children > 1:
+            ap.add(root)
+    return ap
