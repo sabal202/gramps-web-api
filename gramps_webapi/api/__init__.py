@@ -87,6 +87,15 @@ from .resources.merge import (
 )
 from .resources.notes import NoteResource, NotesResource
 from .resources.object_history import ObjectHistoryResource
+from .resources.immich_import.resources import (
+    ImmichAlbumCommitResource,
+    ImmichAlbumPreviewResource,
+    ImmichAlbumsResource,
+    ImmichExistingCommitResource,
+    ImmichExistingPreviewResource,
+    ImmichMappingResource,
+    ImmichPeopleResource,
+)
 from .resources.objects import (
     CreateObjectsResource,
     DeleteObjectsByHandleResource,
@@ -707,6 +716,44 @@ register_endpt(
     "/analysis/centrality/",
     "analysis_centrality",
     tags=["Analysis"],
+)
+
+# Immich import (downstream cluster: import photos/faces from Immich - see
+# gramps_webapi/api/resources/immich_import/ and
+# docs/superpowers/specs/2026-07-09-immich-gramps-import-design.md in the
+# gramps-dev workspace)
+register_endpt(
+    ImmichAlbumsResource, "/immich/albums/", "immich_albums", tags=["Immich"]
+)
+register_endpt(
+    ImmichAlbumPreviewResource,
+    "/immich/albums/<string:album_id>/preview",
+    "immich_album_preview",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichAlbumCommitResource,
+    "/immich/albums/<string:album_id>/commit",
+    "immich_album_commit",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichExistingPreviewResource,
+    "/immich/existing/preview",
+    "immich_existing_preview",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichExistingCommitResource,
+    "/immich/existing/commit",
+    "immich_existing_commit",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichPeopleResource, "/immich/people/", "immich_people", tags=["Immich"]
+)
+register_endpt(
+    ImmichMappingResource, "/immich/mapping/", "immich_mapping", tags=["Immich"]
 )
 
 

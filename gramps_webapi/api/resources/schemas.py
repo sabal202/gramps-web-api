@@ -3274,3 +3274,368 @@ class CentralitySchema(_Base):
         fields.Nested(CentralityPersonSchema),
         metadata={"description": "Ranked people, highest score first."},
     )
+
+
+# ===========================================================================
+# Immich import (downstream cluster - see
+# docs/superpowers/specs/2026-07-09-immich-gramps-import-design.md)
+# ===========================================================================
+#
+# Field names are camelCase to match the frozen endpoint contract exactly
+# (these are consumed directly by the grampsjs frontend, not by other Gramps
+# tooling, so there is no snake_case Gramps-JSON precedent to follow here).
+# ``bbox``/``proposedRect`` are both Gramps-rect-style
+# ``[left, top, right, bottom]`` **percent ints** (0-100) - ``bbox`` is the
+# tight face box straight from Immich, ``proposedRect`` is the "head +
+# shoulders" expansion from ``regions.portrait_region_from_face``. Both are
+# converted from Immich's native pixel coordinates server-side so the
+# frontend never has to know the source image's pixel dimensions.
+
+
+class ImmichAlbumSchema(_Base):
+    """One archive-account Immich album, as listed by GET /api/immich/albums/."""
+
+    id = fields.Str(
+        metadata={"description": "Immich album id (UUID)."},
+    )
+    name = fields.Str(
+        metadata={"description": "Album display name."},
+    )
+    assetCount = fields.Int(
+        metadata={"description": "Number of assets in the album."},
+    )
+    mappedTargetGrampsId = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps ID of the tree object this album has previously "
+            "been mapped to (via its ImmichAlbumId attribute), or null if this "
+            "album has never been imported before."
+        },
+    )
+
+
+class ImmichPersonMatchSchema(_Base):
+    """A face detected on one asset, with its Gramps-side resolution."""
+
+    immichPersonId = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Immich person id this face was clustered to, or null "
+            "for an unrecognized/unassigned face."
+        },
+    )
+    name = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person display name, or null if unnamed."},
+    )
+    bbox = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Tight face bounding box [left, top, right, bottom] as "
+            "percent (0-100) of the image, as returned by Immich before any "
+            "head+shoulders expansion."
+        },
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person (via "
+            "the ImmichPersonId attribute), or null if unmapped - unmapped people "
+            "never block import, they just surface as 'needs linking'."
+        },
+    )
+    proposedRect = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Proposed 'head + shoulders' region "
+            "[left, top, right, bottom] as percent (0-100), editable by the "
+            "curator before commit."
+        },
+    )
+
+
+class ImmichAlbumPreviewItemSchema(_Base):
+    """One photo in a Flow-B album preview."""
+
+    immichAssetId = fields.Str(
+        metadata={"description": "Immich asset id (UUID)."},
+    )
+    thumbnailUrl = fields.Str(
+        metadata={"description": "URL the frontend can load a preview thumbnail from."},
+    )
+    alreadyImported = fields.Bool(
+        metadata={
+            "description": "True if this asset was already imported in a previous "
+            "commit (matched by ImmichAssetId attribute) - shown so the curator "
+            "doesn't re-attach it by accident, though re-committing it is a no-op."
+        },
+    )
+    people = fields.List(
+        fields.Nested(ImmichPersonMatchSchema),
+        metadata={"description": "Faces detected on this asset by Immich."},
+    )
+
+
+class ImmichAlbumPreviewSchema(_Base):
+    """Response schema for GET /api/immich/albums/<album_id>/preview."""
+
+    target = fields.Str(
+        metadata={"description": "Gramps ID of the object this album will attach to."},
+    )
+    items = fields.List(
+        fields.Nested(ImmichAlbumPreviewItemSchema),
+        metadata={"description": "Photos in the album with proposed regions."},
+    )
+
+
+class ImmichAlbumPreviewQueryArgs(Schema):
+    """Query arguments for GET /api/immich/albums/<album_id>/preview."""
+
+    target = fields.Str(
+        required=True,
+        metadata={
+            "description": "Gramps ID of the object (event/family/person/...) to "
+            "attach this album's photos to."
+        },
+    )
+
+
+class ImmichRegionCommitSchema(Schema):
+    """A single person-region to write on commit (request body only)."""
+
+    grampsHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps person handle this region tags."},
+    )
+    rect = fields.List(
+        fields.Int(),
+        required=True,
+        validate=validate.Length(equal=4),
+        metadata={
+            "description": "Region [left, top, right, bottom] as percent (0-100), "
+            "as edited/confirmed by the curator in the review step."
+        },
+    )
+
+
+class ImmichAlbumCommitItemSchema(Schema):
+    """One photo's commit instructions (request body only)."""
+
+    immichAssetId = fields.Str(
+        required=True,
+        metadata={"description": "Immich asset id (UUID) to import."},
+    )
+    attach = fields.Bool(
+        load_default=True,
+        metadata={
+            "description": "Whether to download and attach this photo as Media. "
+            "False imports zero photos for this item but still writes any listed "
+            "regions if the asset was already imported in a previous commit "
+            "(matched by ImmichAssetId)."
+        },
+    )
+    regions = fields.List(
+        fields.Nested(ImmichRegionCommitSchema),
+        load_default=list,
+        metadata={
+            "description": "Person regions to write for this photo. Empty list "
+            "imports the photo as plain media with no face tags - face attachment "
+            "is fully optional (design doc 'Optionality')."
+        },
+    )
+
+
+class ImmichAlbumCommitArgs(Schema):
+    """Request body for POST /api/immich/albums/<album_id>/commit."""
+
+    target = fields.Str(
+        required=True,
+        metadata={
+            "description": "Gramps ID of the object to attach photos to. Persisted "
+            "as this album's remembered target (ImmichAlbumId attribute) on first "
+            "commit."
+        },
+    )
+    items = fields.List(
+        fields.Nested(ImmichAlbumCommitItemSchema),
+        required=True,
+        metadata={"description": "Photos to import/update, as reviewed by the curator."},
+    )
+
+
+class ImmichSkippedItemSchema(_Base):
+    """One asset that could not be imported."""
+
+    immichAssetId = fields.Str(
+        metadata={"description": "Immich asset id (UUID) that was skipped."},
+    )
+    reason = fields.Str(
+        metadata={
+            "description": "Why the asset was skipped, e.g. a corrupt/short-read "
+            "download detected before the DbTxn opened."
+        },
+    )
+
+
+class ImmichAlbumCommitResultSchema(_Base):
+    """Response schema for POST /api/immich/albums/<album_id>/commit."""
+
+    createdMedia = fields.List(
+        fields.Str(),
+        metadata={"description": "Handles of newly created Media objects."},
+    )
+    updatedMedia = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Handles of existing Media objects that were reused "
+            "(checksum dedup) or had new regions/attributes added."
+        },
+    )
+    skipped = fields.List(
+        fields.Nested(ImmichSkippedItemSchema),
+        metadata={"description": "Assets that could not be imported, with a reason."},
+    )
+
+
+class ImmichExistingPreviewPersonSchema(_Base):
+    """A face suggestion for one already-in-tree media object (Flow A)."""
+
+    immichPersonId = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person id, or null if unrecognized."},
+    )
+    name = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person display name, or null if unnamed."},
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person, or "
+            "null if unmapped."
+        },
+    )
+    proposedRect = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Proposed 'head + shoulders' region "
+            "[left, top, right, bottom] as percent (0-100)."
+        },
+    )
+    alreadyHasRegion = fields.Bool(
+        metadata={
+            "description": "True if this person already has a cropped region on "
+            "this media (region proposal is suppressed/informational only in "
+            "that case - Flow A only proposes regions where one is absent)."
+        },
+    )
+
+
+class ImmichExistingPreviewItemSchema(_Base):
+    """One already-in-tree media object with face suggestions (Flow A)."""
+
+    mediaHandle = fields.Str(
+        metadata={"description": "Gramps handle of the existing Media object."},
+    )
+    immichAssetId = fields.Str(
+        metadata={
+            "description": "Immich asset id this media was matched to (by basename "
+            "or checksum against the external library)."
+        },
+    )
+    people = fields.List(
+        fields.Nested(ImmichExistingPreviewPersonSchema),
+        metadata={"description": "Face suggestions for this media."},
+    )
+
+
+class ImmichExistingPreviewSchema(_Base):
+    """Response schema for GET /api/immich/existing/preview."""
+
+    items = fields.List(
+        fields.Nested(ImmichExistingPreviewItemSchema),
+        metadata={
+            "description": "Already-in-tree media objects with pending face "
+            "suggestions, matched against the Immich external library."
+        },
+    )
+
+
+class ImmichExistingRegionCommitItemSchema(Schema):
+    """One media object's region commit instructions (request body only)."""
+
+    mediaHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps handle of the existing Media object."},
+    )
+    regions = fields.List(
+        fields.Nested(ImmichRegionCommitSchema),
+        required=True,
+        metadata={"description": "Person regions to add to this media."},
+    )
+
+
+class ImmichExistingCommitArgs(Schema):
+    """Request body for POST /api/immich/existing/commit."""
+
+    items = fields.List(
+        fields.Nested(ImmichExistingRegionCommitItemSchema),
+        required=True,
+        metadata={"description": "Media objects to add regions to."},
+    )
+
+
+class ImmichExistingCommitResultSchema(_Base):
+    """Response schema for POST /api/immich/existing/commit."""
+
+    updatedMedia = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Handles of Media objects that had regions added. "
+            "Files are never touched (zero-copy) - only MediaRef regions on the "
+            "tagged persons change."
+        },
+    )
+
+
+class ImmichPersonSchema(_Base):
+    """Response schema for GET /api/immich/people/."""
+
+    immichPersonId = fields.Str(
+        metadata={"description": "Immich person id (UUID)."},
+    )
+    name = fields.Str(
+        metadata={"description": "Immich person display name."},
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person (via "
+            "ImmichPersonId attribute), or null if unmapped."
+        },
+    )
+
+
+class ImmichPeopleQueryArgs(Schema):
+    """Query arguments for GET /api/immich/people/."""
+
+    query = fields.Str(
+        load_default="",
+        metadata={
+            "description": "Case-insensitive substring filter on the Immich person "
+            "name. Empty string (default) returns all people."
+        },
+    )
+
+
+class ImmichMappingArgs(Schema):
+    """Request body for POST /api/immich/mapping/."""
+
+    immichPersonId = fields.Str(
+        required=True,
+        metadata={"description": "Immich person id to map."},
+    )
+    grampsHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps person handle to map it to."},
+    )
