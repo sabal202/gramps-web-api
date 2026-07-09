@@ -1,10 +1,12 @@
 """Pure unit tests for graph_primitives (no gi required)."""
 from gramps_webapi.api.resources.graph_primitives import (
+    ancestry_depth,
     articulation_points,
     betweenness_centrality,
     closeness_centrality,
     connected_components,
     degree_centrality,
+    roots,
 )
 
 
@@ -51,3 +53,18 @@ def test_closeness_center_highest():
     adj = {"h": {"a", "b", "c"}, "a": {"h"}, "b": {"h"}, "c": {"h"}}
     cc = dict(closeness_centrality(adj))
     assert cc["h"] == max(cc.values())
+
+
+def test_ancestry_depth_counts_longest_chain():
+    # child c -> parent b -> parent a ; also c -> parent x (shallow)
+    parents = {"c": ["b", "x"], "b": ["a"], "a": [], "x": [], "d": []}
+    depth = ancestry_depth(parents)     # {node: longest #generations up}
+    assert depth["c"] == 2
+    assert depth["b"] == 1
+    assert depth["a"] == 0
+    assert depth["d"] == 0
+
+
+def test_roots_are_parentless():
+    parents = {"c": ["b"], "b": [], "z": []}
+    assert roots(parents) == {"b", "z"}

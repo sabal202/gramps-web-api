@@ -144,3 +144,36 @@ def closeness_centrality(adj: Adjacency) -> list[tuple[Hashable, float]]:
         score = ((len(dist) - 1) / total) if total > 0 else 0.0
         out.append((s, score))
     return sorted(out, key=lambda kv: (-kv[1], str(kv[0])))
+
+
+def ancestry_depth(parents: dict[Hashable, list[Hashable]]) -> dict[Hashable, int]:
+    """Longest number of generations UP from each node (0 = no known parents).
+
+    *parents* maps node -> list of parent nodes. Assumes a DAG; a defensive
+    visiting-set breaks any accidental cycle (returns partial depth, no crash).
+    """
+    memo: dict[Hashable, int] = {}
+
+    def depth(n: Hashable, visiting: set[Hashable]) -> int:
+        if n in memo:
+            return memo[n]
+        if n in visiting:            # cycle guard
+            return 0
+        ps = parents.get(n, ())
+        if not ps:
+            memo[n] = 0
+            return 0
+        visiting.add(n)
+        best = 1 + max(depth(p, visiting) for p in ps)
+        visiting.discard(n)
+        memo[n] = best
+        return best
+
+    for node in parents:
+        depth(node, set())
+    return memo
+
+
+def roots(parents: dict[Hashable, list[Hashable]]) -> set[Hashable]:
+    """Nodes with no recorded parents (genealogical 'brick walls')."""
+    return {n for n in parents if not parents.get(n)}
