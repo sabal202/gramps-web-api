@@ -1933,6 +1933,12 @@ class ObjectCountsSchema(_Base):
     repositories = fields.Float(metadata={"description": "Number of repositories."})
     sources = fields.Float(metadata={"description": "Number of sources."})
     tags = fields.Float(metadata={"description": "Number of tags."})
+    unique_surnames = fields.Float(
+        metadata={
+            "description": "Number of distinct surnames, collapsing "
+            "masculine/feminine gender forms into one."
+        }
+    )
 
 
 class ResearcherSchema(_Base):

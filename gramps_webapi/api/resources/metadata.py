@@ -48,6 +48,7 @@ from ..search.metadata import get_stored_model_name
 from ..util import get_db_handle, get_tree_from_jwt_or_fail
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
+from .ru_surnames import count_unique_surnames
 from .schemas import MetadataSchema, ResearcherSchema
 
 
@@ -210,6 +211,12 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
                 "repositories": db_handle.get_number_of_repositories(),
                 "notes": db_handle.get_number_of_notes(),
                 "tags": db_handle.get_number_of_tags(),
+                # Downstream: distinct surnames, collapsing masculine/feminine
+                # gender forms (Соболевский/Соболевская) into one. The raw list
+                # is already patronymic-free (first surname of each person).
+                "unique_surnames": count_unique_surnames(
+                    db_handle.get_surname_list()
+                ),
             },
             "researcher": db_handle.get_researcher(),
             "search": {

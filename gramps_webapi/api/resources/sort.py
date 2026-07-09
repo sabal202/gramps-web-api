@@ -33,6 +33,8 @@ from gramps.gen.lib.primaryobj import BasicPrimaryObject as GrampsObject
 from gramps.gen.soundex import soundex
 from gramps.gen.utils.db import get_birth_or_fallback, get_death_or_fallback
 
+from .ru_surnames import get_family_surname
+
 
 class Sort:
     """Class for extracting sort keys."""
@@ -73,7 +75,7 @@ class Sort:
     def by_person_surname_key(self, obj: GrampsObject):
         """Compare by surname, if equal uses given name and suffix."""
         name = obj.get_primary_name()
-        fsn = name.get_surname()
+        fsn = get_family_surname(name)
         ffn = name.get_first_name()
         fsu = name.get_suffix()
         return self.locale.sort_key(fsn + ffn + fsu)
@@ -118,7 +120,7 @@ class Sort:
         if person is None:
             return self.locale.sort_key("")
         name = person.get_primary_name()
-        fsn = name.get_surname()
+        fsn = get_family_surname(name)
         ffn = name.get_first_name()
         fsu = name.get_suffix()
         return self.locale.sort_key(fsn + ffn + fsu)
