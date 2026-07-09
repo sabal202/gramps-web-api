@@ -2877,3 +2877,400 @@ class CommonAncestorsSchema(_Base):
             "and no ?to= was provided."
         },
     )
+
+
+# NOTE: this branch (feat/graph-analysis) predates feat/kinship, so the
+# KinshipPersonSchema / MediaRefSimpleSchema defined there (for /relatives/)
+# do not exist here yet. AnalysisPersonSchema below is a deliberately
+# separate, self-contained light-person schema (no media_list) so this
+# section merges into `integration` without colliding with those classes.
+
+from webargs.fields import DelimitedList  # noqa: E402
+
+
+class AnalysisPersonSchema(_Base):
+    """Lightweight person profile used by the /analysis/* endpoints."""
+
+    handle = fields.Str(
+        metadata={"description": "Unique handle for the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Alternate user-managed identifier for the person."},
+    )
+    name_given = fields.Str(
+        metadata={"description": "Given (first) name."},
+    )
+    name_surname = fields.Str(
+        metadata={"description": "Surname."},
+    )
+    name_display = fields.Str(
+        metadata={"description": "Full display name."},
+    )
+    sex = fields.Str(
+        metadata={"description": "Sex of the person ('M', 'F', 'X', or 'U')."},
+    )
+    birth = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Birth event profile (or best available fallback)."},
+    )
+    death = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Death event profile (or best available fallback)."},
+    )
+
+
+class ConnectivityQueryArgs(Schema):
+    """Query arguments for the /analysis/connectivity/ endpoint."""
+
+    include_singletons = fields.Bool(
+        load_default=True,
+        metadata={
+            "description": "Whether to include single-person islands ('orphans') "
+            "in the response. When false, orphans are omitted (islands with 2+ "
+            "people are always included)."
+        },
+    )
+
+
+class ConnectivityIslandSchema(_Base):
+    """A connected component of the tree other than the main one."""
+
+    size = fields.Int(
+        metadata={"description": "Number of people in this island."},
+    )
+    people = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "Person profiles of everyone in this island."},
+    )
+
+
+class ConnectivityPairSchema(_Base):
+    """An isolated pair: two people connected only to each other."""
+
+    people = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "The two people forming the isolated pair."},
+    )
+
+
+class ConnectivitySchema(_Base):
+    """Response schema for GET /api/analysis/connectivity/."""
+
+    person_count = fields.Int(
+        metadata={"description": "Total number of people considered."},
+    )
+    component_count = fields.Int(
+        metadata={"description": "Number of connected components (main + islands)."},
+    )
+    main_component_size = fields.Int(
+        metadata={
+            "description": "Number of people in the largest connected component."
+        },
+    )
+    islands = fields.List(
+        fields.Nested(ConnectivityIslandSchema),
+        metadata={
+            "description": "Connected components other than the main one, largest "
+            "first. Includes isolated pairs and single-person orphans as well "
+            "(see those two fields for a filtered view of just those cases)."
+        },
+    )
+    isolated_pairs = fields.List(
+        fields.Nested(ConnectivityPairSchema),
+        metadata={"description": "Components consisting of exactly two people."},
+    )
+    orphans = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "People with no connections to anyone else in the tree. "
+            "Empty unless include_singletons=true."
+        },
+    )
+
+
+class LineagesQueryArgs(Schema):
+    """Query arguments for the /analysis/lineages/ endpoint.
+
+    With no ``person``, analyzes whole-tree lineages (brick-wall roots and
+    their descendant closures). With ``person`` given, switches to
+    deepest-ancestors mode: the ancestor lines of just that one person.
+    """
+
+    person = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of an anchor person. When given, "
+            "switches to deepest-ancestors mode: ancestor lines of just this "
+            "person, instead of whole-tree lineages."
+        },
+    )
+    birth_only = fields.Bool(
+        load_default=False,
+        metadata={
+            "description": "Only follow birth-relationship parent/child links "
+            "(exclude adoptive/step parent-child links) when computing depth."
+        },
+    )
+    group_by = fields.Str(
+        load_default="root",
+        validate=validate.OneOf(["root", "surname"]),
+        metadata={
+            "description": "Whole-tree mode only: group lineages by individual "
+            "root person ('root') or by the root's family surname ('surname')."
+        },
+    )
+    min_size = fields.Int(
+        load_default=1,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "Whole-tree mode only: omit lineages with fewer than "
+            "this many descendants."
+        },
+    )
+    generations = fields.Int(
+        load_default=0,
+        validate=validate.Range(min=0),
+        metadata={
+            "description": "Deepest-ancestors mode only: maximum number of "
+            "generations to walk up from the anchor. 0 = unlimited."
+        },
+    )
+    top = fields.Int(
+        load_default=10,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "Maximum number of lineages (whole-tree mode) or "
+            "ancestor-lines (deepest-ancestors mode) to return."
+        },
+    )
+
+
+class LineageEntrySchema(_Base):
+    """A single lineage in whole-tree mode: a brick-wall root and its line."""
+
+    root = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={
+            "description": "The lineage's root person. Absent when group_by="
+            "'surname' (see 'roots' instead)."
+        },
+    )
+    roots = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "Only present when group_by='surname': every root "
+            "person sharing this surname."
+        },
+    )
+    surname = fields.Str(
+        allow_none=True,
+        metadata={"description": "Only present when group_by='surname'."},
+    )
+    depth = fields.Int(
+        metadata={"description": "Longest chain of descendants below the root."},
+    )
+    size = fields.Int(
+        metadata={"description": "Number of people in the descendant closure."},
+    )
+
+
+class AncestorLineSchema(_Base):
+    """A single ancestor line in deepest-ancestors mode."""
+
+    root = fields.Nested(
+        AnalysisPersonSchema,
+        metadata={"description": "The deepest ancestor on this line."},
+    )
+    depth = fields.Int(
+        metadata={"description": "Generations above the anchor to this ancestor."},
+    )
+    ancestors = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "Every ancestor on this line, root to anchor."},
+    )
+
+
+class LineagesSchema(_Base):
+    """Response schema for GET /api/analysis/lineages/.
+
+    Whole-tree mode (no ``person``) populates ``max_tree_depth``,
+    ``root_count``, and ``lineages``. Deepest-ancestors mode (``person``
+    given) populates ``anchor``, ``max_depth``, ``by_line``, and
+    ``furthest`` instead.
+    """
+
+    # Whole-tree mode
+    max_tree_depth = fields.Int(
+        allow_none=True,
+        metadata={
+            "description": "Whole-tree mode: longest ancestry chain in the tree."
+        },
+    )
+    root_count = fields.Int(
+        allow_none=True,
+        metadata={"description": "Whole-tree mode: total number of brick-wall roots."},
+    )
+    lineages = fields.List(
+        fields.Nested(LineageEntrySchema),
+        metadata={"description": "Whole-tree mode: lineages, deepest/largest first."},
+    )
+    # Deepest-ancestors mode
+    anchor = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={"description": "Deepest-ancestors mode: the anchor person."},
+    )
+    max_depth = fields.Int(
+        allow_none=True,
+        metadata={
+            "description": "Deepest-ancestors mode: generations to the anchor's "
+            "most distant known ancestor(s)."
+        },
+    )
+    by_line = fields.List(
+        fields.Nested(AncestorLineSchema),
+        metadata={"description": "Deepest-ancestors mode: per-lineage breakdown."},
+    )
+    furthest = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "Deepest-ancestors mode: the anchor's most distant "
+            "known ancestor(s) (there may be more than one at the max depth)."
+        },
+    )
+
+
+class IntegrityQueryArgs(Schema):
+    """Query arguments for the /analysis/integrity/ endpoint."""
+
+    checks = DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        validate=validate.ContainsOnly(
+            ["one_sided_refs", "dangling", "thin_records"]
+        ),
+        load_default=["one_sided_refs", "dangling"],
+        metadata={
+            "description": "Comma-delimited list of checks to run. Choices: "
+            "'one_sided_refs' (family/person cross-references that don't point "
+            "back at each other), 'dangling' (references to missing families or "
+            "events), 'thin_records' (people with no events at all — opt-in, "
+            "noisy). Default: 'one_sided_refs,dangling'."
+        },
+    )
+    max_examples = fields.Int(
+        load_default=0,
+        validate=validate.Range(min=0),
+        metadata={
+            "description": "Maximum number of example problems to return per "
+            "check. 0 = unlimited."
+        },
+    )
+
+
+class IntegrityProblemSchema(_Base):
+    """A single data-integrity finding."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the affected person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Gramps ID of the affected person."},
+    )
+    detail = fields.Str(
+        metadata={"description": "Human-readable description of the problem."},
+    )
+    person = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={"description": "Profile of the affected person, if resolvable."},
+    )
+
+
+class IntegritySchema(_Base):
+    """Response schema for GET /api/analysis/integrity/."""
+
+    checks = fields.List(
+        fields.Str(),
+        metadata={"description": "Checks that were actually run (subset of ?checks=)."},
+    )
+    counts = fields.Dict(
+        keys=fields.Str(),
+        values=fields.Int(),
+        metadata={"description": "Number of problems found per check."},
+    )
+    problems = fields.Dict(
+        keys=fields.Str(),
+        values=fields.List(fields.Nested(IntegrityProblemSchema)),
+        metadata={
+            "description": "Problems found per check, truncated to ?max_examples= "
+            "if set."
+        },
+    )
+
+
+class CentralityQueryArgs(Schema):
+    """Query arguments for the /analysis/centrality/ endpoint."""
+
+    metric = fields.Str(
+        load_default="betweenness",
+        validate=validate.OneOf(
+            ["betweenness", "closeness", "degree", "articulation"]
+        ),
+        metadata={
+            "description": "Centrality metric. 'betweenness': how often someone "
+            "sits on the shortest path between others (bridge people). "
+            "'closeness': how close someone is to everyone else on average. "
+            "'degree': raw number of direct connections. 'articulation': cut "
+            "vertices whose removal would split the tree into disconnected "
+            "pieces."
+        },
+    )
+    max = fields.Int(
+        load_default=10,
+        validate=validate.Range(min=1),
+        metadata={"description": "Maximum number of ranked people to return."},
+    )
+    max_nodes = fields.Int(
+        load_default=5000,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "For 'betweenness'/'closeness' only: components larger "
+            "than this many people are skipped (these algorithms are expensive "
+            "on large graphs); the response's 'capped' flag notes when this "
+            "happened."
+        },
+    )
+
+
+class CentralityPersonSchema(_Base):
+    """A single ranked person in a centrality result."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the person."},
+    )
+    score = fields.Float(
+        metadata={"description": "Raw centrality score for the chosen metric."},
+    )
+    profile = fields.Nested(
+        AnalysisPersonSchema,
+        metadata={"description": "Person profile."},
+    )
+
+
+class CentralitySchema(_Base):
+    """Response schema for GET /api/analysis/centrality/."""
+
+    metric = fields.Str(
+        metadata={"description": "The centrality metric that was computed."},
+    )
+    capped = fields.Bool(
+        metadata={
+            "description": "True if one or more oversized components were "
+            "skipped due to ?max_nodes=."
+        },
+    )
+    people = fields.List(
+        fields.Nested(CentralityPersonSchema),
+        metadata={"description": "Ranked people, highest score first."},
+    )
