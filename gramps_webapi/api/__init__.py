@@ -35,6 +35,12 @@ from .resources.bookmarks import (
     BookmarksResource,
 )
 from .resources.access_tokens import UserAccessTokenResource
+from .resources.analysis import (
+    CentralityResource,
+    ConnectivityResource,
+    IntegrityResource,
+    LineagesResource,
+)
 from .resources.chat import ChatResource
 from .resources.citations import CitationResource, CitationsResource
 from .resources.config import ConfigResource, ConfigsResource
@@ -656,6 +662,27 @@ register_endpt(
     "/media/archive/upload/zip",
     "media_archive_upload_zip",
     tags=["Media"],
+)
+
+# Analysis (whole-tree structural analysis: connectivity, lineages, integrity,
+# centrality — see gramps_webapi/api/resources/analysis.py)
+register_endpt(
+    ConnectivityResource,
+    "/analysis/connectivity/",
+    "analysis_connectivity",
+    tags=["Analysis"],
+)
+register_endpt(
+    LineagesResource, "/analysis/lineages/", "analysis_lineages", tags=["Analysis"]
+)
+register_endpt(
+    IntegrityResource, "/analysis/integrity/", "analysis_integrity", tags=["Analysis"]
+)
+register_endpt(
+    CentralityResource,
+    "/analysis/centrality/",
+    "analysis_centrality",
+    tags=["Analysis"],
 )
 
 
