@@ -191,5 +191,64 @@ class TestGraphAnalysis(unittest.TestCase):
         self.assertTrue(result["capped"])
 
 
+class _FakeChildRef:
+    def __init__(self, ref):
+        self.ref = ref
+
+    def get_father_relation(self):
+        return None  # non-BIRTH → excluded from parents_birth
+
+    def get_mother_relation(self):
+        return None
+
+
+class _FakeFamily:
+    def __init__(self, father, mother, child):
+        self._f, self._m, self._c = father, mother, child
+
+    def get_father_handle(self):
+        return self._f
+
+    def get_mother_handle(self):
+        return self._m
+
+    def get_child_ref_list(self):
+        return [_FakeChildRef(self._c)]
+
+
+class _FakeDb:
+    """Minimal DB stub whose families reference handles NOT in the person table.
+
+    Mirrors the privacy-proxy / dangling-reference case: ``get_person_handles()``
+    excludes handles that ``iter_families()`` still references (a private spouse/
+    child, or a dangling ref to a deleted person).
+    """
+
+    def get_person_handles(self):
+        return ["p_seed"]
+
+    def iter_families(self):
+        return [_FakeFamily("p_seed", "p_private", "p_dangling")]
+
+
+class TestBuildTreeGraphRobustness(unittest.TestCase):
+    """build_tree_graph must not KeyError on handles missing from the node seed.
+
+    Regression: link() used bare-dict indexing, which crashed whenever a family
+    referenced an unseeded handle (private member via the privacy proxy, or a
+    dangling ref). Such handles must be tolerated as no-op leaf nodes.
+    """
+
+    def test_unseeded_family_member_does_not_crash(self):
+        db = _FakeDb()
+        g = build_tree_graph(db)
+        self.assertIn("p_private", g.undirected)
+        self.assertIn("p_dangling", g.undirected)
+        self.assertIn("p_seed", g.undirected["p_private"])
+        # connectivity() runs without raising on such a graph.
+        result = connectivity(db, g=g)
+        self.assertGreaterEqual(result["component_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
