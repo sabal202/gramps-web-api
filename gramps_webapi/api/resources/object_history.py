@@ -26,7 +26,7 @@ from flask import Response
 from marshmallow import Schema
 from webargs import fields, validate
 
-from ...auth.const import PERM_VIEW_PRIVATE
+from ...auth.const import PERM_EDIT_OBJ
 from ...const import GRAMPS_NAMESPACES
 from ..auth import require_permissions
 from ..blueprint import api_blueprint
@@ -89,7 +89,9 @@ class ObjectHistoryResource(ProtectedResource):
     @api_blueprint.arguments(ObjectHistoryQueryArgs, location="query")
     def get(self, args: Dict, namespace: str, handle: str) -> Response:
         """Return the change history for an object, optionally scoped to its page."""
-        require_permissions([PERM_VIEW_PRIVATE])
+        # Editor+ (can-edit floor). PERM_VIEW_PRIVATE would be Member+ — too wide;
+        # Editor+ is a subset of view-private holders, so no private leak either.
+        require_permissions([PERM_EDIT_OBJ])
         class_name = OBJECT_HISTORY_NAMESPACES.get(namespace)
         if class_name is None:
             abort_with_message(404, f"Unknown namespace: {namespace}")

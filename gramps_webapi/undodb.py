@@ -47,11 +47,9 @@ from sqlalchemy import (
     LargeBinary,
     PrimaryKeyConstraint,
     Text,
-    and_,
     create_engine,
     exists,
     inspect,
-    or_,
     select,
     text,
 )
@@ -609,13 +607,12 @@ class DbUndoSQLWeb(DbUndoSQL):
                 .where(
                     Change.connection_id == Transaction.connection_id,
                     Change.obj_handle.in_(handle_list),
-                    or_(
-                        Transaction.first.is_(None),
-                        and_(
-                            Change.id >= Transaction.first,
-                            Change.id <= Transaction.last,
-                        ),
-                    ),
+                    # Bind to this transaction's change-id range. Empty
+                    # (zero-change) transactions have first/last = NULL and so
+                    # match no change here, correctly excluding them (a NULL
+                    # first/last would otherwise sweep in the whole connection).
+                    Change.id >= Transaction.first,
+                    Change.id <= Transaction.last,
                 )
                 .correlate(Transaction)
             )
