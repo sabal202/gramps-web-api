@@ -31,6 +31,13 @@ from pydantic_ai import RunContext
 from ..people_families_cache import CachePeopleFamiliesProxy
 from ..resources.anniversaries import upcoming_anniversaries
 from ..resources.filters import apply_filter
+from ..resources.graph_analysis import (
+    centrality,
+    connectivity,
+    deepest_ancestors,
+    integrity,
+    lineages,
+)
 from ..resources.kinship import (
     _ancestors_bfs,
     _descendants_bfs,
@@ -1861,3 +1868,492 @@ def get_descendants(
     if ctx.deps.progress_callback:
         ctx.deps.progress_callback("get_descendants", "Tracing descendants...")
     return _render_pedigree(ctx, gramps_id, ascending=False, generations=generations)
+
+
+# ---------------------------------------------------------------------------
+# Graph-analysis tools (whole-tree structure: connectivity, lineages,
+# integrity, centrality). Thin wrappers over resources/graph_analysis.py.
+# ---------------------------------------------------------------------------
+
+
+def _render_handle_line(
+    db_handle, locale, handle: str, include_private: bool
+) -> str | None:
+    """Render a person handle as a linked line, or None if missing/private."""
+    person = db_handle.get_person_from_handle(handle)
+    if person is None:
+        return None
+    if not include_private and person.private:
+        return None
+    return _person_line(db_handle, person, locale)
+
+
+@log_tool_call
+def analyze_tree_connectivity(
+    ctx: RunContext[AgentDeps], max_islands: int = 20, include_orphans: bool = True
+) -> str:
+    """Analyze whether the family tree is fully connected, or split into islands.
+
+    Use for "is the tree all connected?", "are there disconnected people /
+    islands / orphans?", "how many separate branches does the tree have?".
+    Reports the size of the main connected component plus every smaller
+    island (disconnected group) and any fully isolated (orphan) individuals.
+
+    Args:
+        max_islands: Maximum number of non-main islands to list in detail
+            (default 20).
+        include_orphans: Whether to list fully isolated single people
+            separately (default True). Set False to hide them when there are
+            too many to be useful.
+
+    Returns:
+        A summary of the tree's connectivity with linked sample members.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback(
+            "analyze_tree_connectivity", "Checking tree connectivity..."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        locale = _tool_locale()
+        result = connectivity(db_handle, include_singletons=include_orphans)
+
+        def _samples(handles: list[str], limit: int = 3) -> list[str]:
+            lines: list[str] = []
+            for h in handles:
+                if len(lines) >= limit:
+                    break
+                line = _render_handle_line(db_handle, locale, h, ctx.deps.include_private)
+                if line:
+                    lines.append(line)
+            return lines
+
+        islands = result["islands"]
+        out = [
+            f"Tree connectivity: {result['person_count']} people in "
+            f"{result['component_count']} connected component(s). Main "
+            f"component: {result['main_component_size']} people."
+        ]
+
+        if not islands and not (include_orphans and result["orphans"]):
+            out.append("The whole tree is connected — no islands or orphans.")
+            return "\n".join(out)
+
+        if islands:
+            out.append(f"\n### Islands ({len(islands)} disconnected group(s))")
+            for island in islands[:max_islands]:
+                sample_text = "; ".join(_samples(island["handles"])) or (
+                    "(no visible members)"
+                )
+                out.append(f"- {island['size']} people: {sample_text}")
+            if len(islands) > max_islands:
+                out.append(
+                    f"- …and {len(islands) - max_islands} more island(s) "
+                    "(raise max_islands to see them)."
+                )
+
+        if result["isolated_pairs"]:
+            out.append(f"\n### Isolated pairs ({len(result['isolated_pairs'])})")
+            for pair in result["isolated_pairs"][:max_islands]:
+                pair_text = " & ".join(_samples(pair, limit=2))
+                if pair_text:
+                    out.append(f"- {pair_text}")
+
+        if include_orphans and result["orphans"]:
+            orphan_lines = _samples(result["orphans"], limit=10)
+            out.append(f"\n### Fully isolated people ({len(result['orphans'])})")
+            out.extend(f"- {line}" for line in orphan_lines)
+            remaining = len(result["orphans"]) - len(orphan_lines)
+            if remaining > 0:
+                out.append(f"- …and {remaining} more.")
+
+        return _truncate_content("\n".join(out), ctx.deps.max_context_length)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error analyzing tree connectivity: %s", e)
+        return f"Error analyzing tree connectivity: {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_deepest_ancestors(
+    ctx: RunContext[AgentDeps],
+    gramps_id: str = "",
+    generations: int = 0,
+    birth_only: bool = False,
+    top: int = 10,
+) -> str:
+    """Find a person's deepest known ancestors, broken down by lineage line.
+
+    Use for "who are my deepest / furthest / highest known ancestors", "how far
+    back does each of my family lines go". Distinct from get_ancestors, which
+    just lists every generation — this tool finds the maximum depth reached
+    and groups ancestors by the lineage (root ancestor) they belong to.
+
+    Args:
+        gramps_id: Gramps ID of the person to trace back from. Leave empty for
+            the home person.
+        generations: Cap on how many generations up to search (default 0 =
+            unlimited).
+        birth_only: If True, only follow BIRTH parent-child relations
+            (excludes adoptive/step). Default False follows all recorded
+            relations.
+        top: Maximum number of lineage lines to include in the breakdown
+            (default 10).
+
+    Returns:
+        The maximum depth reached, the furthest ancestor(s), and a per-lineage
+        breakdown, all linked.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback(
+            "get_deepest_ancestors", "Tracing the deepest ancestors..."
+        )
+
+    gid = (gramps_id or ctx.deps.home_person_gramps_id or "").strip()
+    if not gid:
+        return (
+            "No person was specified and no home person is set. Ask the user who "
+            "they are, or provide a Gramps ID."
+        )
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        anchor = db_handle.get_person_from_gramps_id(gid)
+        if anchor is None:
+            return f"No person found with Gramps ID '{gid}'."
+
+        locale = _tool_locale()
+        result = deepest_ancestors(
+            db_handle, anchor, generations=generations, birth_only=birth_only, top=top
+        )
+        anchor_line = _person_line(db_handle, anchor, locale)
+
+        if not result["by_line"]:
+            return f"No ancestors recorded for {anchor_line}."
+
+        def _line(h: str) -> str | None:
+            return _render_handle_line(db_handle, locale, h, ctx.deps.include_private)
+
+        furthest_lines = [line for h in result["furthest"] if (line := _line(h))]
+
+        out = [
+            f"Deepest ancestors of {anchor_line}: {result['max_depth']} "
+            "generation(s) back."
+        ]
+        if furthest_lines:
+            out.append("Furthest known ancestor(s): " + "; ".join(furthest_lines))
+
+        out.append(f"\n### By lineage line ({len(result['by_line'])})")
+        max_length = ctx.deps.max_context_length
+        current_length = sum(len(p) for p in out)
+        for line_info in result["by_line"]:
+            root_line = _line(line_info["root"])
+            if root_line is None:
+                continue
+            member_lines = [m for h in line_info["ancestors"] if (m := _line(h))]
+            shown = member_lines[:8]
+            block = (
+                f"\n- **{root_line}** — depth {line_info['depth']}, "
+                f"{len(line_info['ancestors'])} people: "
+                + "; ".join(shown)
+                + ("; …" if len(member_lines) > len(shown) else "")
+            )
+            if current_length + len(block) > max_length:
+                out.append("\n…(further lineage lines omitted to fit)")
+                break
+            out.append(block)
+            current_length += len(block)
+
+        return "\n".join(out)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error finding deepest ancestors of %s: %s", gid, e)
+        return f"Error finding deepest ancestors of '{gid}': {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def analyze_lineages(
+    ctx: RunContext[AgentDeps],
+    top: int = 15,
+    min_size: int = 1,
+    birth_only: bool = False,
+    group_by: str = "root",
+) -> str:
+    """Analyze the tree's lineages: root ("brick wall") ancestors and how deep
+    and large each descendant line grows.
+
+    Use for "what are the tree's lineages / root ancestors / brick walls?",
+    "how deep does each family line go?", "which lineage has the most people?".
+
+    Args:
+        top: Maximum number of lineage lines to list, ranked by depth then
+            size (default 15).
+        min_size: Only include lineages with at least this many descendants,
+            including the root itself (default 1 = include all).
+        birth_only: If True, only follow BIRTH parent-child relations.
+        group_by: "root" (default) — one entry per brick-wall root ancestor;
+            or "surname" — group root ancestors sharing a family surname.
+
+    Returns:
+        The maximum tree depth and the top lineage lines, linked where the
+        root person is known and not private.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("analyze_lineages", "Analyzing lineages...")
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        locale = _tool_locale()
+        result = lineages(
+            db_handle, birth_only=birth_only, group_by=group_by, min_size=min_size
+        )
+
+        out = [
+            f"Tree lineages: {result['root_count']} root ancestor(s), max "
+            f"depth {result['max_tree_depth']} generation(s)."
+        ]
+        entries = result["lineages"][:top]
+        if not entries:
+            out.append("No lineages matched the given filters.")
+            return "\n".join(out)
+
+        out.append(f"\n### Top lineage lines ({len(entries)})")
+        max_length = ctx.deps.max_context_length
+        current_length = sum(len(p) for p in out)
+        for entry in entries:
+            if group_by == "surname":
+                label = entry.get("surname") or "?"
+                root_lines = [
+                    _render_handle_line(db_handle, locale, h, ctx.deps.include_private)
+                    for h in entry.get("roots", [])
+                ]
+                root_lines = [line for line in root_lines if line]
+                header = f"**{label}**"
+                if root_lines:
+                    header += " (" + "; ".join(root_lines[:5]) + ")"
+            else:
+                root_line = _render_handle_line(
+                    db_handle, locale, entry["root"], ctx.deps.include_private
+                )
+                header = f"**{root_line}**" if root_line else "(private/unknown root)"
+            block = (
+                f"\n- {header} — depth {entry['depth']}, "
+                f"{entry['size']} descendant(s)"
+            )
+            if current_length + len(block) > max_length:
+                out.append("\n…(further lineages omitted to fit)")
+                break
+            out.append(block)
+            current_length += len(block)
+
+        return "\n".join(out)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error analyzing lineages: %s", e)
+        return f"Error analyzing lineages: {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+_INTEGRITY_CHECKS = ("one_sided_refs", "dangling", "thin_records")
+
+
+def _parse_integrity_checks(checks: str) -> tuple[str, ...]:
+    """Parse the tool's checks= argument into the tuple integrity() expects.
+
+    "all" (or empty) means the default structural pair — NOT thin_records,
+    which is noisy (flags every person with zero recorded events) and only
+    runs when explicitly named.
+    """
+    raw = (checks or "").strip().lower()
+    if not raw or raw == "all":
+        return ("one_sided_refs", "dangling")
+    wanted = [c.strip() for c in raw.split(",") if c.strip()]
+    valid = [c for c in wanted if c in _INTEGRITY_CHECKS]
+    return tuple(valid) or ("one_sided_refs", "dangling")
+
+
+@log_tool_call
+def check_tree_integrity(
+    ctx: RunContext[AgentDeps], checks: str = "all", max_examples: int = 10
+) -> str:
+    """Scan the tree for structural data problems (broken or one-sided records).
+
+    Use for "are there data problems in the tree?", "why is someone's chart
+    empty?", "find broken records". Checks for one-sided family references
+    (e.g. a person listed as a family's child, but the family is missing from
+    their own parent-family list — a common cause of an empty chart) and
+    dangling references to missing families/events.
+
+    Args:
+        checks: Comma-separated list of checks to run, or "all" (default) for
+            the two structural checks (one_sided_refs, dangling). Add
+            "thin_records" explicitly to also flag people with zero recorded
+            events (noisy, opt-in only).
+        max_examples: Maximum example problems to list per check (default 10).
+
+    Returns:
+        Per-check problem counts plus the first few linked examples with the
+        defect detail.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback(
+            "check_tree_integrity", "Scanning for data problems..."
+        )
+
+    logger = get_logger()
+    db_handle = None
+    try:
+        db_handle = _open_db(ctx)
+        locale = _tool_locale()
+        check_tuple = _parse_integrity_checks(checks)
+        result = integrity(db_handle, checks=check_tuple, max_examples=max_examples)
+
+        counts = result["counts"]
+        if not any(counts.values()):
+            return f"No problems found ({', '.join(result['checks'])} checks passed)."
+
+        out = ["Tree integrity check results:"]
+        for check_name in result["checks"]:
+            problems = result["problems"].get(check_name, [])
+            out.append(f"\n### {check_name} ({counts.get(check_name, 0)} found)")
+            if not problems:
+                out.append("- none")
+                continue
+            for prob in problems:
+                line = _render_handle_line(
+                    db_handle, locale, prob["handle"], ctx.deps.include_private
+                )
+                label = line or prob.get("gramps_id") or prob["handle"]
+                out.append(f"- {label}: {prob['detail']}")
+
+        return _truncate_content("\n".join(out), ctx.deps.max_context_length)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error checking tree integrity: %s", e)
+        return f"Error checking tree integrity: {e}"
+    finally:
+        if db_handle is not None:
+            try:
+                db_handle.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+_CENTRALITY_METRICS = ("betweenness", "closeness", "degree", "articulation")
+_CENTRALITY_GLOSS = {
+    "betweenness": (
+        "sits on many of the shortest connecting paths between other pairs of "
+        "people — a bridge between different parts of the tree"
+    ),
+    "closeness": "is, on average, close to everyone else they're connected to",
+    "degree": "has the most direct family connections (spouses/parents/children)",
+    "articulation": (
+        "removing them would split the connected tree into separate, "
+        "disconnected parts"
+    ),
+}
+
+
+@log_tool_call
+def find_key_people(
+    ctx: RunContext[AgentDeps], metric: str = "betweenness", top: int = 10
+) -> str:
+    """Find structurally key ("central" or "bridge") people in the family tree.
+
+    Use for "who are the key / central / most connected / bridge people in the
+    tree?". Ranks people by a graph-centrality metric computed over the whole
+    connection graph (spouse and parent-child links, including non-birth).
+
+    Args:
+        metric: Which centrality metric to rank by:
+            - "betweenness" (default): bridges between otherwise-distant parts
+              of the tree.
+            - "closeness": on average closest to everyone else.
+            - "degree": most direct family connections.
+            - "articulation": cut-vertices — removing them splits the tree
+              into disconnected pieces.
+        top: Maximum number of people to return (default 10).
+
+    Returns:
+        Ranked linked people with their scores and a plain-language gloss of
+        what the metric means.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("find_key_people", "Finding key people...")
+
+    metric = (metric or "betweenness").strip().lower()
+    if metric not in _CENTRALITY_METRICS:
+        return f"Unknown metric '{metric}'. Use one of: " + ", ".join(
+            _CENTRALITY_METRICS
+        )
+
+    logger = get_logger()
+    db_handle = None
+    try:
+        db_handle = _open_db(ctx)
+        locale = _tool_locale()
+        result = centrality(db_handle, metric=metric, top=top)
+
+        people = result["people"]
+        if not people:
+            return f"No people found for metric '{metric}'."
+
+        out = [f"Key people by **{metric}** — {_CENTRALITY_GLOSS[metric]}:"]
+        if result.get("capped"):
+            out.append(
+                "\n(Note: the tree is large, so this metric was computed "
+                "per connected component and oversized components were "
+                "skipped — results may be incomplete.)"
+            )
+
+        max_length = ctx.deps.max_context_length
+        current_length = sum(len(p) for p in out)
+        rank = 0
+        for entry in people:
+            line = _render_handle_line(
+                db_handle, locale, entry["handle"], ctx.deps.include_private
+            )
+            if line is None:
+                continue
+            rank += 1
+            score = entry["score"]
+            score_str = (
+                str(int(score)) if metric in ("degree", "articulation") else f"{score:.4f}"
+            )
+            block = f"\n{rank}. {line} — score {score_str}"
+            if current_length + len(block) > max_length:
+                out.append("\n…(further people omitted to fit)")
+                break
+            out.append(block)
+            current_length += len(block)
+
+        return "\n".join(out)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error finding key people (metric=%s): %s", metric, e)
+        return f"Error finding key people (metric='{metric}'): {e}"
+    finally:
+        if db_handle is not None:
+            try:
+                db_handle.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
