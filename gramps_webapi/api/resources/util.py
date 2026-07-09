@@ -148,6 +148,89 @@ def get_source_by_handle(
     return obj
 
 
+def _get_object_by_handle(
+    db_handle: DbReadBase, class_name: str, handle: Handle
+) -> Optional[GrampsObject]:
+    """Look up an object of a given Gramps class by handle, or None if missing."""
+    getter = getattr(db_handle, f"get_{class_name.lower()}_from_handle", None)
+    if getter is None:
+        return None
+    try:
+        return getter(handle)
+    except HandleError:
+        return None
+
+
+def get_page_reference_handles(
+    db_handle: DbReadBase, class_name: str, handle: Handle
+) -> set:
+    """Return the handle set that counts as "this object's page".
+
+    Used to scope the per-object change history endpoint (``scope=page``): the
+    object's own handle, plus the handles of objects that its own page renders
+    inline (media, notes, citations, events, and for a Person also its
+    families). See the per-type table in
+    ``docs/superpowers/specs/2026-07-08-gramps-object-history-design.md``.
+
+    Referenced *peer* objects that have their own primary page (other
+    persons, places behind an event, sources behind a citation) are
+    deliberately not followed - their history lives on their own page.
+    Associations and child/parent relationships are stored on the
+    Person/Family object itself, so edits to them are already changes to
+    that object's handle and need no extra gathering.
+    """
+    handles = {handle}
+    obj = _get_object_by_handle(db_handle, class_name, handle)
+    if obj is None:
+        return handles
+
+    def add_media_notes_citations(source_obj) -> None:
+        if hasattr(source_obj, "get_media_list"):
+            handles.update(ref.ref for ref in source_obj.get_media_list() if ref.ref)
+        if hasattr(source_obj, "get_note_list"):
+            handles.update(h for h in source_obj.get_note_list() if h)
+        if hasattr(source_obj, "get_citation_list"):
+            handles.update(h for h in source_obj.get_citation_list() if h)
+
+    def add_events(source_obj) -> None:
+        if not hasattr(source_obj, "get_event_ref_list"):
+            return
+        for event_ref in source_obj.get_event_ref_list():
+            event_handle = event_ref.ref
+            if not event_handle:
+                continue
+            handles.add(event_handle)
+            event = _get_object_by_handle(db_handle, "Event", event_handle)
+            if event is not None:
+                add_media_notes_citations(event)
+
+    if class_name == "Person":
+        add_media_notes_citations(obj)
+        add_events(obj)
+        family_handles = set(obj.get_family_handle_list() or []) | set(
+            obj.get_parent_family_handle_list() or []
+        )
+        for family_handle in family_handles:
+            if not family_handle:
+                continue
+            handles.add(family_handle)
+            family = _get_object_by_handle(db_handle, "Family", family_handle)
+            if family is not None:
+                add_media_notes_citations(family)
+                add_events(family)
+    elif class_name == "Family":
+        add_media_notes_citations(obj)
+        add_events(obj)
+    else:
+        # Event, Place, Source, Citation, Repository, Media: self plus
+        # whichever of media/notes/citations apply (guarded by hasattr
+        # above). Note, Tag: no such mixins, so this is a no-op beyond
+        # {handle}.
+        add_media_notes_citations(obj)
+
+    return handles
+
+
 def get_sex_profile(person: Person) -> str:
     """Get character substitution for enumerated sex."""
     if person.gender == person.MALE:

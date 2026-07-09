@@ -80,6 +80,7 @@ from .resources.merge import (
     MergeSourceResource,
 )
 from .resources.notes import NoteResource, NotesResource
+from .resources.object_history import ObjectHistoryResource
 from .resources.objects import (
     CreateObjectsResource,
     DeleteObjectsByHandleResource,
@@ -207,6 +208,13 @@ register_endpt(
     TransactionUndoResource,
     "/transactions/history/<int:transaction_id>/undo",
     "transaction_undo",
+    tags=["Transactions"],
+)
+# Per-object change history
+register_endpt(
+    ObjectHistoryResource,
+    "/<string:namespace>/<string:handle>/history/",
+    "object_history",
     tags=["Transactions"],
 )
 # Token

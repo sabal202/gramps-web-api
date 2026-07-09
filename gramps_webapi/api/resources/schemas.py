@@ -1789,6 +1789,16 @@ class UndoTransactionSchema(_Base):
         fields.Raw(),
         metadata={"description": "List of individual object changes."},
     )
+    matched_handles = fields.List(
+        fields.Str(),
+        metadata={
+            "description": (
+                "Handles from the requested object/page handle set that this "
+                "transaction touched. Only populated by the per-object "
+                "change history endpoint (GET /api/<namespace>/<handle>/history/)."
+            )
+        },
+    )
 
 
 class FilterRuleDescriptionSchema(_Base):
