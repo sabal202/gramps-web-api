@@ -47,8 +47,12 @@ from sqlalchemy import (
     LargeBinary,
     PrimaryKeyConstraint,
     Text,
+    and_,
     create_engine,
+    exists,
     inspect,
+    or_,
+    select,
     text,
 )
 
@@ -79,7 +83,7 @@ class Change(Base):
     connection_id = mapped_column(Integer, ForeignKey("connections.id"), index=True)
     obj_class = mapped_column(Text)
     trans_type = mapped_column(Integer)
-    obj_handle = mapped_column(Text)
+    obj_handle = mapped_column(Text, index=True)
     ref_handle = mapped_column(Text)
     old_data = mapped_column(LargeBinary)
     new_data = mapped_column(LargeBinary)
@@ -581,6 +585,66 @@ class DbUndoSQLWeb(DbUndoSQL):
             transaction = query.scalar()
             return transaction._to_dict(old_data=old_data, new_data=new_data)
 
+    def get_object_transactions(
+        self,
+        handles: set[str] | list[str],
+        page: int = 1,
+        pagesize: int = 10,
+        ascending: bool = False,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Get transactions in this tree touching any of the given handles.
+
+        Returns a JSONifiable list of transactions (without old/new object data)
+        together with the total count, for pagination. Each transaction dict is
+        annotated with ``matched_handles``: the subset of ``handles`` that this
+        particular transaction touched.
+        """
+        handle_list = list(handles)
+        if not handle_list:
+            return [], 0
+        handle_set = set(handle_list)
+        with self.session_scope() as session:
+            change_exists = (
+                select(Change.id)
+                .where(
+                    Change.connection_id == Transaction.connection_id,
+                    Change.obj_handle.in_(handle_list),
+                    or_(
+                        Transaction.first.is_(None),
+                        and_(
+                            Change.id >= Transaction.first,
+                            Change.id <= Transaction.last,
+                        ),
+                    ),
+                )
+                .correlate(Transaction)
+            )
+            query = (
+                session.query(Transaction)
+                .join(Connection)
+                .filter(Connection.tree_id == self.tree_id)
+                .filter(exists(change_exists))
+            )
+            count = query.count()
+            if ascending:
+                query = query.order_by(Transaction.id)
+            else:
+                query = query.order_by(Transaction.id.desc())
+            if page and pagesize:
+                query = query.limit(pagesize).offset((page - 1) * pagesize)
+            transactions = query.all()
+            result = []
+            for transaction in transactions:
+                data = transaction._to_dict(old_data=False, new_data=False)
+                matched = {
+                    change["obj_handle"]
+                    for change in data["changes"]
+                    if change["obj_handle"] in handle_set
+                }
+                data["matched_handles"] = sorted(matched)
+                result.append(data)
+            return result, count
+
 
 def _add_json_columns(undodb: DbUndoSQL) -> None:
     """Add old_json/new_json columns to the changes table if not already present.
@@ -601,10 +665,27 @@ def _add_json_columns(undodb: DbUndoSQL) -> None:
                 )
 
 
+def _add_obj_handle_index(undodb: DbUndoSQL) -> None:
+    """Add an index on changes.obj_handle if not already present.
+
+    Needed for efficient per-object change history queries
+    (``DbUndoSQLWeb.get_object_transactions``). New databases get the index
+    automatically from the mapped column's ``index=True``; this covers
+    databases created before that was added.
+    """
+    with undodb.engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_changes_obj_handle ON changes (obj_handle)"
+            )
+        )
+
+
 def migrate(undodb: DbUndoSQL) -> None:
     """Migrate the undo db to a new schema if needed."""
     undodb._ensure_schema()
     _add_json_columns(undodb)
+    _add_obj_handle_index(undodb)
     with undodb.session_scope() as session:
         # return all rows where old_json AND new_json are NULL
         rows = (
