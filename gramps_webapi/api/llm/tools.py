@@ -37,6 +37,11 @@ from ..resources.kinship import (
     common_ancestors,
     relatives_of,
 )
+from ..resources.ru_surnames import (
+    count_unique_surnames,
+    get_family_surname,
+    normalize_surname_gender,
+)
 from ..resources.util import (
     get_event_profile_for_object,
     get_event_summary_from_object,
@@ -1576,14 +1581,18 @@ def get_tree_statistics(ctx: RunContext[AgentDeps]) -> str:
                 **counts
             )
         )
-        lines.append(f"- Distinct surnames: {len(surnames)}")
+        lines.append(f"- Distinct surnames: {count_unique_surnames(surnames)}")
 
         # Top surnames by frequency (bounded to avoid heavy scans on huge trees).
+        # Use the family surname (patronymic excluded) collapsed to its
+        # masculine base so gender forms (Соболевский/Соболевская) count as one.
         if counts["people"] and counts["people"] <= 20000:
             freq: dict[str, int] = {}
             for person in db_handle.iter_people():
                 try:
-                    surname = person.primary_name.get_surname()
+                    surname = normalize_surname_gender(
+                        get_family_surname(person.primary_name)
+                    )
                 except Exception:  # pylint: disable=broad-except
                     surname = ""
                 if surname:
