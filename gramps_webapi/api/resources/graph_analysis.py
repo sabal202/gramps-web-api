@@ -60,9 +60,15 @@ def build_tree_graph(db: DbReadBase) -> TreeGraph:
         g.parents_birth.setdefault(handle, [])
 
     def link(a: str, b: str) -> None:
+        # Use setdefault, not bare indexing: a family may reference a handle that
+        # is NOT in the seeded node set — e.g. a private spouse/child (the privacy
+        # proxy's iter_families() returns unsanitized member refs even though
+        # get_person_handles() excludes the private person), or a dangling ref to a
+        # deleted person. Such handles become no-op leaf nodes; they hydrate to
+        # None later and are dropped from output — no crash, no privacy leak.
         if a and b and a != b:
-            g.undirected[a].add(b)
-            g.undirected[b].add(a)
+            g.undirected.setdefault(a, set()).add(b)
+            g.undirected.setdefault(b, set()).add(a)
 
     for family in db.iter_families():
         father = family.get_father_handle()
