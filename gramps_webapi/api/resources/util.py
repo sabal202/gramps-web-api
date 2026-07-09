@@ -89,7 +89,7 @@ from ..util import (
 )
 from .inlaw import inlaw_relationship as _inlaw_relationship
 from .marital_status import get_marital_status
-from .ru_surnames import get_family_surname
+from .ru_surnames import get_family_surname, get_patronymic
 
 pd = PlaceDisplay()
 _ = glocale.translation.gettext
@@ -697,6 +697,7 @@ def get_person_profile_for_object(
         "death": death,
         "name_given": name_displayer.display_given(person),
         "name_surname": get_family_surname(person.primary_name),
+        "name_patronymic": get_patronymic(person.primary_name),
         "name_display": (
             name_displayer.format_str(person.get_primary_name(), name_format)
             if name_format
