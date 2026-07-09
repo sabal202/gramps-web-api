@@ -91,6 +91,7 @@ from .resources.immich_import.resources import (
     ImmichAlbumCommitResource,
     ImmichAlbumPreviewResource,
     ImmichAlbumsResource,
+    ImmichAssetThumbnailResource,
     ImmichExistingCommitResource,
     ImmichExistingPreviewResource,
     ImmichMappingResource,
@@ -754,6 +755,12 @@ register_endpt(
 )
 register_endpt(
     ImmichMappingResource, "/immich/mapping/", "immich_mapping", tags=["Immich"]
+)
+register_endpt(
+    ImmichAssetThumbnailResource,
+    "/immich/assets/<string:asset_id>/thumbnail",
+    "immich_asset_thumbnail",
+    tags=["Immich"],
 )
 
 

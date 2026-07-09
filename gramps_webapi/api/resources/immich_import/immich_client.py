@@ -202,3 +202,25 @@ class ImmichClient:
             "GET", f"/api/assets/{asset_id}/original", stream=False
         )
         return resp.content
+
+    def get_thumbnail(
+        self, asset_id: str, size: str = "preview"
+    ) -> tuple[bytes, str]:
+        """``GET /assets/{id}/thumbnail`` - thumbnail bytes for one asset.
+
+        Returned as ``(bytes, content_type)``. ``size`` is ``"preview"`` (the
+        larger, review-friendly render) or ``"thumbnail"`` (small square).
+
+        Proxied to the browser through our own ``/api/immich/assets/<id>/
+        thumbnail`` endpoint so the archive API key never leaves the server
+        (design doc "Open risks": the key is server-side only). The browser
+        cannot reach ``immich_server`` directly (internal docker hostname,
+        no auth), so a same-origin proxy is mandatory.
+        """
+        resp = self._request(
+            "GET",
+            f"/api/assets/{asset_id}/thumbnail",
+            params={"size": size},
+            headers={"Accept": "*/*"},
+        )
+        return resp.content, resp.headers.get("Content-Type", "image/jpeg")

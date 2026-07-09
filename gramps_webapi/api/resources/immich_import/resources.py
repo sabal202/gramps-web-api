@@ -230,9 +230,10 @@ class ImmichAlbumPreviewResource(ProtectedResource, GrampsJSONEncoder):
             items.append(
                 {
                     "immichAssetId": asset_id,
-                    "thumbnailUrl": (
-                        f"{client.base_url}/api/assets/{asset_id}/thumbnail"
-                    ),
+                    # Same-origin path to our own proxy (below) - the archive
+                    # API key stays server-side; the browser cannot reach
+                    # immich_server directly. The frontend appends ?jwt=.
+                    "thumbnailUrl": f"/api/immich/assets/{asset_id}/thumbnail",
                     "alreadyImported": already_imported,
                     "people": people,
                 }
@@ -545,3 +546,31 @@ class ImmichMappingResource(ProtectedResource, GrampsJSONEncoder):
                 abort_with_message(404, str(exc))
 
         return Response(status=204)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/immich/assets/<asset_id>/thumbnail  (binary proxy)
+# ---------------------------------------------------------------------------
+
+
+class ImmichAssetThumbnailResource(ProtectedResource):
+    """Proxy an Immich asset thumbnail to the browser.
+
+    Flow B previews reference Immich assets that are NOT yet Gramps media, so
+    the browser has no local thumbnail to render. It also cannot fetch from
+    ``immich_server`` directly (internal docker hostname + server-side archive
+    key). This endpoint streams the thumbnail bytes fetched with the archive
+    key, same-origin, authed via the standard ``?jwt=`` query param (JWT query
+    location is enabled globally, see config ``JWT_TOKEN_LOCATION``). Returns
+    raw image bytes - no JSON schema, so no ``@api_blueprint.response``.
+    """
+
+    def get(self, asset_id: str) -> Response:
+        """Stream the Immich preview thumbnail for one asset."""
+        require_permissions([PERM_EDIT_OBJ])
+        client = ImmichClient()
+        try:
+            data, content_type = client.get_thumbnail(asset_id)
+        except _IMMICH_UNAVAILABLE_ERRORS as exc:
+            abort_with_message(502, f"Immich API unavailable: {exc}")
+        return Response(data, mimetype=content_type)
