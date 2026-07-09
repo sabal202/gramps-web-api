@@ -75,6 +75,25 @@ def get_family_surname(name):
     return " ".join(parts).strip()
 
 
+def get_patronymic(name):
+    """Return the patronymic of a Gramps ``Name``, or "" if there is none.
+
+    In the Russian naming tradition the отчество is stored as a surname entry
+    with origintype PATRONYMIC (or MATRONYMIC). Returns the surname string of
+    the first such entry so it can be shown as its own column instead of being
+    folded into the family surname.
+    """
+    from gramps.gen.lib import NameOriginType
+
+    want = {NameOriginType.PATRONYMIC, NameOriginType.MATRONYMIC}
+    for surn in name.get_surname_list():
+        if surn.get_origintype().value in want:
+            patronymic = surn.get_surname().strip()
+            if patronymic:
+                return patronymic
+    return ""
+
+
 def count_unique_surnames(surname_list):
     """Count distinct surnames after collapsing masculine/feminine gender forms.
 
