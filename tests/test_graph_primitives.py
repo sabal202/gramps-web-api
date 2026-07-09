@@ -1,6 +1,8 @@
 """Pure unit tests for graph_primitives (no gi required)."""
 from gramps_webapi.api.resources.graph_primitives import (
     articulation_points,
+    betweenness_centrality,
+    closeness_centrality,
     connected_components,
     degree_centrality,
 )
@@ -36,3 +38,16 @@ def test_articulation_points_finds_cut_vertex():
 def test_articulation_points_none_in_cycle():
     adj = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
     assert articulation_points(adj) == set()
+
+
+def test_betweenness_path_midpoint_highest():
+    adj = {"a": {"b"}, "b": {"a", "c"}, "c": {"b", "d"}, "d": {"c"}}
+    bc = dict(betweenness_centrality(adj))
+    assert bc["b"] > bc["a"]
+    assert bc["c"] > bc["d"]
+
+
+def test_closeness_center_highest():
+    adj = {"h": {"a", "b", "c"}, "a": {"h"}, "b": {"h"}, "c": {"h"}}
+    cc = dict(closeness_centrality(adj))
+    assert cc["h"] == max(cc.values())

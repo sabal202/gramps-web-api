@@ -5,7 +5,7 @@ graph_analysis.py builds the adjacency and calls into here.
 """
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 from typing import Hashable
 
 Adjacency = dict[Hashable, set[Hashable]]
@@ -92,3 +92,55 @@ def articulation_points(adj: Adjacency) -> set[Hashable]:
         if root_children > 1:
             ap.add(root)
     return ap
+
+
+def betweenness_centrality(adj: Adjacency) -> list[tuple[Hashable, float]]:
+    """Unweighted betweenness (Brandes). Undirected → divide final scores by 2."""
+    bc: dict[Hashable, float] = {n: 0.0 for n in adj}
+    for s in adj:
+        stack: list[Hashable] = []
+        preds: dict[Hashable, list[Hashable]] = {n: [] for n in adj}
+        sigma: dict[Hashable, float] = {n: 0.0 for n in adj}
+        dist: dict[Hashable, int] = {n: -1 for n in adj}
+        sigma[s] = 1.0
+        dist[s] = 0
+        queue: deque[Hashable] = deque([s])
+        while queue:
+            v = queue.popleft()
+            stack.append(v)
+            for w in adj.get(v, ()):
+                if dist[w] < 0:
+                    dist[w] = dist[v] + 1
+                    queue.append(w)
+                if dist[w] == dist[v] + 1:
+                    sigma[w] += sigma[v]
+                    preds[w].append(v)
+        delta: dict[Hashable, float] = defaultdict(float)
+        while stack:
+            w = stack.pop()
+            for v in preds[w]:
+                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+            if w != s:
+                bc[w] += delta[w]
+    return sorted(
+        ((n, v / 2.0) for n, v in bc.items()),
+        key=lambda kv: (-kv[1], str(kv[0])),
+    )
+
+
+def closeness_centrality(adj: Adjacency) -> list[tuple[Hashable, float]]:
+    """Component-local closeness: (reachable-1) / sum(distances)."""
+    out: list[tuple[Hashable, float]] = []
+    for s in adj:
+        dist: dict[Hashable, int] = {s: 0}
+        queue: deque[Hashable] = deque([s])
+        while queue:
+            v = queue.popleft()
+            for w in adj.get(v, ()):
+                if w not in dist:
+                    dist[w] = dist[v] + 1
+                    queue.append(w)
+        total = sum(dist.values())
+        score = ((len(dist) - 1) / total) if total > 0 else 0.0
+        out.append((s, score))
+    return sorted(out, key=lambda kv: (-kv[1], str(kv[0])))
