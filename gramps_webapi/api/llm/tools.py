@@ -38,7 +38,7 @@ from ..resources.kinship import (
     relatives_of,
 )
 from ..resources.ru_surnames import (
-    count_unique_surnames,
+    count_unique_family_surnames,
     get_family_surname,
     normalize_surname_gender,
 )
@@ -1577,7 +1577,6 @@ def get_tree_statistics(ctx: RunContext[AgentDeps], top_surnames: int = 10) -> s
             "media": db_handle.get_number_of_media(),
             "notes": db_handle.get_number_of_notes(),
         }
-        surnames = db_handle.get_surname_list() or []
 
         lines = ["Family tree statistics:"]
         lines.append(
@@ -1587,7 +1586,9 @@ def get_tree_statistics(ctx: RunContext[AgentDeps], top_surnames: int = 10) -> s
                 **counts
             )
         )
-        lines.append(f"- Distinct surnames: {count_unique_surnames(surnames)}")
+        lines.append(
+            f"- Distinct surnames: {count_unique_family_surnames(db_handle)}"
+        )
 
         # Top surnames by frequency (bounded to avoid heavy scans on huge trees).
         # Use the family surname (patronymic excluded) collapsed to its
