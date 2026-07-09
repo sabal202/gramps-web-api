@@ -35,3 +35,11 @@ def connected_components(adj: Adjacency) -> list[set[Hashable]]:
         components.append(comp)
     components.sort(key=len, reverse=True)
     return components
+
+
+def degree_centrality(adj: Adjacency) -> list[tuple[Hashable, int]]:
+    """Nodes ranked by neighbour count, descending (ties: node order stable)."""
+    return sorted(
+        ((n, len(adj.get(n, ()))) for n in adj),
+        key=lambda kv: (-kv[1], str(kv[0])),
+    )
