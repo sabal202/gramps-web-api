@@ -63,6 +63,8 @@ from ...auth.const import (
     PERM_VIEW_OTHER_USER,
     ROLE_ADMIN,
     ROLE_DISABLED,
+    ROLE_EDITOR,
+    ROLE_GUEST,
     ROLE_OWNER,
     ROLE_UNCONFIRMED,
     SCOPE_CONF_EMAIL,
@@ -452,6 +454,24 @@ class UserRegisterResource(Resource):
             abort_with_message(422, "Not allowed in single-tree setup")
         if "tree" in args and not tree_exists(args["tree"]):
             abort_with_message(422, "Tree does not exist")
+        # Downstream (public instances): if a default registration role is
+        # configured, provision the account immediately with that role and skip
+        # the e-mail confirmation / owner-approval steps. Guarded to the
+        # GUEST..EDITOR range so public registration can never mint OWNER/ADMIN.
+        default_role = current_app.config.get("REGISTRATION_DEFAULT_ROLE")
+        if default_role is not None and ROLE_GUEST <= default_role <= ROLE_EDITOR:
+            try:
+                add_user(
+                    name=user_name,
+                    password=args["password"],
+                    email=args["email"],
+                    fullname=args["full_name"],
+                    tree=args.get("tree"),
+                    role=default_role,
+                )
+            except ValueError as exc:
+                abort_with_message(409, str(exc))
+            return "", 201
         try:
             add_user(
                 name=user_name,

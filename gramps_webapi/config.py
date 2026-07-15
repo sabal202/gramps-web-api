@@ -84,6 +84,12 @@ class DefaultConfig(object):
     NEW_DB_BACKEND = "sqlite"
     RATE_LIMIT_MEDIA_ARCHIVE = "1 per day"
     REGISTRATION_DISABLED = False
+    # Downstream (public instances): if set to an integer role ID, self-registered
+    # users are provisioned immediately with that role, skipping e-mail
+    # confirmation and owner approval. None (default) keeps the stock two-step
+    # flow (UNCONFIRMED -> e-mail confirm -> owner assigns role). Only roles in
+    # the range GUEST..EDITOR are honoured (never OWNER/ADMIN via registration).
+    REGISTRATION_DEFAULT_ROLE = None
     LOG_LEVEL = "INFO"
     LLM_BASE_URL = None
     LLM_MODEL = ""
