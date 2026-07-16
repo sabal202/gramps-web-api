@@ -49,6 +49,7 @@ from gramps.gen.utils.grampslocale import GrampsLocale
 from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
 
 from ..blueprint import api_blueprint
+from ..cache import request_cache_decorator
 from ..util import abort_with_message, get_db_handle, get_locale_for_language
 from . import ProtectedResource
 from . import graph_analysis
@@ -142,6 +143,7 @@ class ConnectivityResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, ConnectivitySchema())
     @api_blueprint.arguments(ConnectivityQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict) -> Response:
         """Get connectivity/islands analysis of the whole tree."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
@@ -189,6 +191,7 @@ class LineagesResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, LineagesSchema())
     @api_blueprint.arguments(LineagesQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict) -> Response:
         """Get whole-tree lineages, or one person's deepest-ancestor lines."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
@@ -292,6 +295,7 @@ class IntegrityResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, IntegritySchema())
     @api_blueprint.arguments(IntegrityQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict) -> Response:
         """Get data-integrity findings for the whole tree."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
@@ -339,6 +343,7 @@ class CentralityResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, CentralitySchema())
     @api_blueprint.arguments(CentralityQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict) -> Response:
         """Get key/central people in the whole tree, ranked by centrality metric."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
