@@ -116,6 +116,34 @@ def connectivity(
     }
 
 
+def components(
+    db: DbReadBase, *, min_size: int = 1, g: TreeGraph | None = None
+) -> list[dict[str, Any]]:
+    """Connected components as ranked member lists, largest first.
+
+    Each entry is ``{"rank": <1-based size rank>, "size": n, "handles": [...]}``.
+    Ranks are assigned over ALL components BEFORE the ``min_size`` filter, so
+    rank 1 is always the largest component even when smaller ones are dropped —
+    this keeps a component's rank stable regardless of the filter, so callers
+    can address "component 3" consistently.
+
+    Within each component the members are ordered by degree (most-connected
+    first), then by handle for determinism. Because a component is maximal,
+    every neighbour of a member is in the same component, so this global degree
+    is the intra-component degree. A caller taking the first few handles thus
+    gets the most representative (hub) people, not arbitrary ones.
+    """
+    g = g or build_tree_graph(db)
+    comps = gp.connected_components(g.undirected)
+    out: list[dict[str, Any]] = []
+    for rank, comp in enumerate(comps, start=1):
+        if len(comp) < min_size:
+            continue
+        members = sorted(comp, key=lambda h: (-len(g.undirected.get(h, ())), h))
+        out.append({"rank": rank, "size": len(comp), "handles": members})
+    return out
+
+
 def deepest_ancestors(
     db: DbReadBase,
     anchor,
