@@ -23,7 +23,7 @@ from typing import TypeVar
 
 import gramps_ql as gql
 import object_ql as oql
-from flask import abort, request
+from flask import abort, g, request
 from flask_jwt_extended import get_jwt_identity
 from gramps.gen.const import GRAMPS_LOCALE as glocale
 from gramps.gen.db import DbTxn
@@ -35,6 +35,7 @@ from marshmallow import Schema
 from pyparsing.exceptions import ParseBaseException
 from webargs import fields, validate
 
+from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
 from gramps_webapi.types import ResponseReturnValue
 
 from ...auth.const import PERM_ADD_OBJ, PERM_DEL_OBJ, PERM_EDIT_OBJ
@@ -73,6 +74,12 @@ from .util import (
 )
 
 T = TypeVar("T", bound=GrampsObject)
+
+# When building profiles for at least this many people/families in a single
+# unfiltered, unpaginated request, pre-cache people & families so the shared
+# parent/spouse/child dereferences inside profile-building become dict hits
+# instead of repeated DB deserializations (see GrampsObjectsResource.get).
+PROFILE_CACHE_MIN_OBJECTS = 200
 
 
 class GrampsObjectResourceHelper(GrampsJSONEncoder):
@@ -650,6 +657,28 @@ class GrampsObjectsResource(GrampsObjectResourceHelper, Resource):
         if args["page"] > 0:
             offset = (args["page"] - 1) * args["pagesize"]
             objects = objects[offset : offset + args["pagesize"]]
+
+        # Perf: for a large, unfiltered, unpaginated People/Family profile
+        # request we are about to deserialise every object anyway, so caching
+        # people & families first turns the many shared parent/spouse/child
+        # dereferences inside profile-building into dict hits instead of
+        # repeated DB reads. Gated so it can never regress a small or filtered
+        # query (which has little sharing and shouldn't pay a full-tree scan),
+        # and kept off the query/sort/filter path above (that flow uses
+        # DB-backed methods a caching proxy doesn't support). We swap the
+        # request-cached handle in ``g`` so ``full_object`` -> ``db_handle``
+        # picks up the cache for the remainder of this request.
+        if (
+            self.gramps_class_name in ("Person", "Family")
+            and args.get("profile")
+            and args["page"] == 0
+            and not any(key in args for key in ("filter", "rules", "gql", "oql"))
+            and len(objects) >= PROFILE_CACHE_MIN_OBJECTS
+        ):
+            cache_db = CachePeopleFamiliesProxy(self.db_handle)
+            cache_db.cache_people()
+            cache_db.cache_families()
+            g.db = cache_db
 
         return self.response(
             200,
