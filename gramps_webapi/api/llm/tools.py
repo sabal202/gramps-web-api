@@ -33,6 +33,7 @@ from ..resources.anniversaries import upcoming_anniversaries
 from ..resources.filters import apply_filter
 from ..resources.graph_analysis import (
     centrality,
+    components,
     connectivity,
     deepest_ancestors,
     integrity,
@@ -2355,5 +2356,293 @@ def find_key_people(
         if db_handle is not None:
             try:
                 db_handle.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Connected-component drill-down tools. Build on components() (ranked
+# component membership) to profile and enumerate each component ("island") of
+# the tree, so the agent can reason about who belongs to which branch.
+# ---------------------------------------------------------------------------
+
+
+def _family_surname(primary_name) -> str:
+    """Best-effort family surname: patronymic excluded, gender-normalised.
+
+    Uses the downstream ru_surnames helpers when present (correct for Russian
+    patronymic-bearing names, where the plain Gramps surname glues the
+    patronymic on and splits Соболевский/Соболевская apart); falls back to the
+    standard Gramps surname string otherwise. Lazy import keeps this module's
+    top-level dependencies upstream-safe.
+    """
+    try:
+        from ..resources.ru_surnames import (  # pylint: disable=import-outside-toplevel
+            get_family_surname,
+            normalize_surname_gender,
+        )
+
+        return normalize_surname_gender(get_family_surname(primary_name)) or ""
+    except Exception:  # pylint: disable=broad-except
+        try:
+            return primary_name.get_surname() or ""
+        except Exception:  # pylint: disable=broad-except
+            return ""
+
+
+def _component_surnames(
+    db_handle, handles, include_private: bool, top: int
+) -> tuple[list[tuple[str, int]], int]:
+    """Rank family surnames within a set of person handles.
+
+    Returns ``(ranked [(surname, count)][:top], distinct_surname_count)``.
+    Private people are skipped unless ``include_private``.
+    """
+    freq: dict[str, int] = {}
+    for handle in handles:
+        person = db_handle.get_person_from_handle(handle)
+        if person is None:
+            continue
+        if not include_private and person.private:
+            continue
+        surname = _family_surname(person.primary_name)
+        if surname:
+            freq[surname] = freq.get(surname, 0) + 1
+    ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[: max(1, top)], len(freq)
+
+
+def _surname_line(ranked: list[tuple[str, int]], distinct: int) -> str:
+    """Render a 'Dominant surnames: A (n), B (n), … (D distinct)' line."""
+    if not ranked:
+        return "Dominant surnames: (none recorded)"
+    parts = ", ".join(f"{name} ({count})" for name, count in ranked)
+    suffix = f" ({distinct} distinct)" if distinct > len(ranked) else ""
+    return f"Dominant surnames: {parts}{suffix}"
+
+
+@log_tool_call
+def describe_tree_components(
+    ctx: RunContext[AgentDeps],
+    top: int = 12,
+    min_size: int = 2,
+    surnames_per_component: int = 5,
+    samples_per_component: int = 3,
+) -> str:
+    """Profile the tree's connected components ("islands"): the size, dominant
+    surnames, and most-connected members of each.
+
+    Use this to break the tree down by connected component and see WHAT each one
+    is — e.g. "what are the main branches / components of the tree and which
+    surnames dominate each?", "list the components with their families", "which
+    families make up the big islands?". Complements analyze_tree_connectivity
+    (which focuses on whether the tree is connected and lists orphans); this
+    profiles each component's actual contents.
+
+    Components are ranked by size — rank 1 is the largest ("main") component.
+    To then list everyone in one component, or find which component a person
+    belongs to, use get_tree_component with that rank or a person's Gramps ID.
+
+    Args:
+        top: How many of the largest components to describe (default 12).
+        min_size: Skip components smaller than this (default 2, hiding lone
+            orphans; set 1 to include singletons).
+        surnames_per_component: Dominant surnames to list per component
+            (default 5).
+        samples_per_component: Most-connected sample members to show per
+            component (default 3).
+
+    Returns:
+        A ranked, per-component breakdown, each with its dominant surnames and a
+        few linked sample members.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback(
+            "describe_tree_components", "Profiling tree components..."
+        )
+
+    top = max(1, min(int(top or 12), 50))
+    min_size = max(1, int(min_size or 1))
+    surnames_per_component = max(1, min(int(surnames_per_component or 5), 25))
+    samples_per_component = max(0, min(int(samples_per_component or 3), 10))
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        locale = _tool_locale()
+        comps = components(db_handle)  # all components, ranked largest-first
+        if not comps:
+            return "The tree has no people, so there are no components."
+
+        shown = [c for c in comps if c["size"] >= min_size][:top]
+        n_at_min = sum(1 for c in comps if c["size"] >= min_size)
+
+        out = [
+            f"The tree splits into {len(comps)} connected component(s); the main "
+            f"(largest) has {comps[0]['size']} people. "
+            f"{n_at_min} component(s) have at least {min_size} people."
+        ]
+        if not shown:
+            out.append(f"None have at least {min_size} people.")
+            return "\n".join(out)
+
+        max_length = ctx.deps.max_context_length
+        current_length = len(out[0])
+        for comp in shown:
+            ranked, distinct = _component_surnames(
+                db_handle,
+                comp["handles"],
+                ctx.deps.include_private,
+                surnames_per_component,
+            )
+            sample_lines: list[str] = []
+            for handle in comp["handles"]:
+                if len(sample_lines) >= samples_per_component:
+                    break
+                line = _render_handle_line(
+                    db_handle, locale, handle, ctx.deps.include_private
+                )
+                if line:
+                    sample_lines.append(line)
+            block = (
+                f"\n\n### Component {comp['rank']} — {comp['size']} people\n"
+                f"{_surname_line(ranked, distinct)}"
+            )
+            if sample_lines:
+                block += "\nMost-connected: " + "; ".join(sample_lines)
+            if current_length + len(block) > max_length:
+                out.append("\n\n…(further components omitted to fit)")
+                break
+            out.append(block)
+            current_length += len(block)
+
+        return "".join(out)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error describing tree components: %s", e)
+        return f"Error describing tree components: {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
+@log_tool_call
+def get_tree_component(
+    ctx: RunContext[AgentDeps],
+    rank: int = 0,
+    person_gramps_id: str = "",
+    max_members: int = 40,
+    offset: int = 0,
+    surnames: int = 15,
+) -> str:
+    """List the members of ONE connected component ("island"), or find which
+    component a given person belongs to.
+
+    Use for "who is in the main / largest component", "list everyone in
+    component 3", "which component / island is <person> in?", "show the members
+    of the 247-person component". Identify the component EITHER by its size rank
+    (1 = the largest/main component) OR by any person in it (person_gramps_id).
+    With neither, defaults to the main (rank 1) component. Members are returned
+    most-connected first; use offset + max_members to page through a big one.
+
+    Args:
+        rank: 1-based size rank of the component (1 = largest). Ignored when
+            person_gramps_id is given.
+        person_gramps_id: Gramps ID of a person; returns the component that
+            contains them — use this to answer "which component is X in?".
+        max_members: Maximum members to list (default 40, max 200).
+        offset: Skip this many members before listing (for paging).
+        surnames: How many dominant surnames to summarise (default 15).
+
+    Returns:
+        The component's rank and size, its dominant surnames, and a linked,
+        paginated member list.
+    """
+    if ctx.deps.progress_callback:
+        ctx.deps.progress_callback("get_tree_component", "Fetching component...")
+
+    max_members = max(1, min(int(max_members or 40), 200))
+    offset = max(0, int(offset or 0))
+    surnames = max(1, min(int(surnames or 15), 100))
+
+    logger = get_logger()
+    raw = None
+    try:
+        db_handle, raw = _open_cached_db(ctx)
+        locale = _tool_locale()
+        comps = components(db_handle)  # all components, ranked largest-first
+        if not comps:
+            return "The tree has no people, so there are no components."
+
+        target = None
+        header_prefix = ""
+        pid = (person_gramps_id or "").strip()
+        if pid:
+            person = db_handle.get_person_from_gramps_id(pid)
+            if person is None:
+                return f"No person found with Gramps ID '{pid}'."
+            target = next((c for c in comps if person.handle in c["handles"]), None)
+            if target is None:
+                return f"'{pid}' was not found in any component (unexpected)."
+            person_line = _person_line(db_handle, person, locale)
+            header_prefix = (
+                f"{person_line} is in component {target['rank']} "
+                f"(of {len(comps)}).\n\n"
+            )
+        else:
+            want = rank if rank and int(rank) > 0 else 1
+            target = next((c for c in comps if c["rank"] == want), None)
+            if target is None:
+                return (
+                    f"There is no component with rank {want}. The tree has "
+                    f"{len(comps)} component(s) (rank 1 = largest)."
+                )
+
+        ranked, distinct = _component_surnames(
+            db_handle, target["handles"], ctx.deps.include_private, surnames
+        )
+        total = target["size"]
+        window = target["handles"][offset : offset + max_members]
+
+        out = [
+            f"{header_prefix}Component {target['rank']} of {len(comps)} — "
+            f"{total} people.\n{_surname_line(ranked, distinct)}"
+        ]
+
+        member_lines: list[str] = []
+        for handle in window:
+            line = _render_handle_line(
+                db_handle, locale, handle, ctx.deps.include_private
+            )
+            if line:
+                member_lines.append(f"- {line}")
+
+        shown_from = offset + 1 if member_lines else offset
+        shown_to = offset + len(member_lines)
+        out.append(
+            f"\n\nMembers {shown_from}–{shown_to} of {total} "
+            "(most-connected first):"
+        )
+        body = "\n".join(member_lines) if member_lines else "(no visible members)"
+        out.append("\n" + body)
+
+        remaining = total - (offset + len(window))
+        if remaining > 0:
+            out.append(
+                f"\n\n…{remaining} more — call again with offset="
+                f"{offset + len(window)} to continue."
+            )
+
+        return _truncate_content("".join(out), ctx.deps.max_context_length)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error fetching tree component: %s", e)
+        return f"Error fetching tree component: {e}"
+    finally:
+        if raw is not None:
+            try:
+                raw.close()
             except Exception:  # pylint: disable=broad-except
                 pass
