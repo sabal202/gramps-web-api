@@ -32,6 +32,7 @@ from .tools import (
     analyze_lineages,
     analyze_tree_connectivity,
     check_tree_integrity,
+    describe_tree_components,
     filter_events,
     filter_families,
     filter_people,
@@ -49,6 +50,7 @@ from .tools import (
     get_relationship,
     get_relatives,
     get_timeline,
+    get_tree_component,
     get_tree_statistics,
     search_genealogy_database,
 )
@@ -154,6 +156,8 @@ DATES & STATISTICS
 STRUCTURE & HEALTH OF THE TREE
 
 - "islands / disconnected people / orphans / is the tree all connected?": use analyze_tree_connectivity.
+- "what are the components / branches of the tree and which surnames/families make up each?", "break the tree down by connected component": use describe_tree_components (each component profiled with its dominant surnames). Components are ranked by size, rank 1 = the main (largest) one.
+- "who is in the main / largest component", "list everyone in component N", "which component / island is X in?": use get_tree_component (address it by rank, 1 = largest, OR by a person's Gramps ID). Page long components with offset + max_members.
 - "my deepest/highest/furthest ancestors, by lineage line": use get_deepest_ancestors (distinct from get_ancestors, which just lists generations). Omit the ID for the home person.
 - "the tree's lineages / root ancestors / brick walls / how deep does each line go": use analyze_lineages.
 - "data problems / broken records / why is someone's chart empty": use check_tree_integrity.
@@ -223,6 +227,8 @@ def create_agent(
     agent.tool(get_ancestors)
     agent.tool(get_descendants)
     agent.tool(analyze_tree_connectivity)
+    agent.tool(describe_tree_components)
+    agent.tool(get_tree_component)
     agent.tool(get_deepest_ancestors)
     agent.tool(analyze_lineages)
     agent.tool(check_tree_integrity)
