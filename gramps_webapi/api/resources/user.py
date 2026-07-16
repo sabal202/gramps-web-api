@@ -471,7 +471,10 @@ class UserRegisterResource(Resource):
                 )
             except ValueError as exc:
                 abort_with_message(409, str(exc))
-            return "", 201
+            # Signal to the client that the account is active immediately, so the
+            # UI can tell the user to log in rather than to wait for an e-mail
+            # confirmation / owner approval that will never come.
+            return {"email_confirmation_required": False}, 201
         try:
             add_user(
                 name=user_name,
