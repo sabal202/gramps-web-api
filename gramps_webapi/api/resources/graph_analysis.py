@@ -91,6 +91,37 @@ def build_tree_graph(db: DbReadBase) -> TreeGraph:
     return g
 
 
+# Process-level memo of built TreeGraphs. A TreeGraph is inert data (handles +
+# adjacency), so unlike a live DB handle it is safe to share across the AI
+# agent's tool-call thread pool and across chat turns. The cache key must
+# capture everything that changes the graph: the tree, its last-change
+# timestamp (so an edit invalidates), and the privacy view (a private-viewer's
+# graph includes people a guest must not see). Bounded to the few most-recent
+# keys; a size cap is enough because a stale (tree, timestamp) key is never
+# looked up again once the tree changes.
+_TREE_GRAPH_CACHE: dict[Any, TreeGraph] = {}
+_TREE_GRAPH_CACHE_MAX = 8
+
+
+def cached_tree_graph(db: DbReadBase, *, cache_key: Any) -> TreeGraph:
+    """Return ``build_tree_graph(db)`` memoized under ``cache_key``.
+
+    Callers own the key and MUST fold in tree id, last-change timestamp and
+    privacy view (see module note). Pass a key of ``None`` to bypass the cache
+    (e.g. when the last-change timestamp is unknown and staleness can't be
+    ruled out).
+    """
+    if cache_key is None:
+        return build_tree_graph(db)
+    g = _TREE_GRAPH_CACHE.get(cache_key)
+    if g is None:
+        g = build_tree_graph(db)
+        if len(_TREE_GRAPH_CACHE) >= _TREE_GRAPH_CACHE_MAX:
+            _TREE_GRAPH_CACHE.clear()
+        _TREE_GRAPH_CACHE[cache_key] = g
+    return g
+
+
 def connectivity(
     db: DbReadBase, *, include_singletons: bool = True, g: TreeGraph | None = None
 ) -> dict[str, Any]:
