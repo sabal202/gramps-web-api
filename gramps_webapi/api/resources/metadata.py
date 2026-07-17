@@ -42,6 +42,7 @@ from ...auth.const import PERM_EDIT_TREE, PERM_VIEW_PRIVATE
 from ...dbmanager import WebDbManager
 from ..auth import has_permissions, require_permissions
 from ..blueprint import api_blueprint
+from ..cache import get_db_last_change_timestamp
 from ..search import get_search_indexer, get_semantic_search_indexer
 from ..search import _get_search_index_db_url
 from ..search.metadata import get_stored_model_name
@@ -175,6 +176,21 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
             else:
                 sifts_info["count_semantic"] = None
 
+        # Memoize the distinct-surname count (a full people scan, ~200ms on a
+        # large tree) across dashboard loads: it depends only on people's names,
+        # so key it on tree id + db last-change timestamp + privacy view. A
+        # missing timestamp disables the memo (recompute), so staleness is
+        # impossible.
+        surname_ts = get_db_last_change_timestamp(tree_id)
+        surname_cache_key = (
+            (tree_id, surname_ts, has_permissions({PERM_VIEW_PRIVATE}))
+            if surname_ts is not None
+            else None
+        )
+        unique_surnames = count_unique_family_surnames(
+            db_handle, cache_key=surname_cache_key
+        )
+
         result = {
             "database": {
                 "id": db_handle.get_dbid(),
@@ -214,7 +230,7 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
                 # Downstream: distinct family surnames, excluding patronymics
                 # and collapsing masculine/feminine gender forms
                 # (Соболевский/Соболевская) into one.
-                "unique_surnames": count_unique_family_surnames(db_handle),
+                "unique_surnames": unique_surnames,
             },
             "researcher": db_handle.get_researcher(),
             "search": {

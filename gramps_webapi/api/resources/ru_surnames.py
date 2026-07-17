@@ -108,7 +108,17 @@ def count_unique_surnames(surname_list):
     )
 
 
-def count_unique_family_surnames(db, max_scan=20000):
+# Process-level memo for the full-scan surname count. The count is derived
+# purely from people's primary names, so it only changes when the tree is
+# edited. Callers own the key and fold in the tree id, the db last-change
+# timestamp (so an edit invalidates the entry) and the privacy view; a stale
+# key is never read again, so a small size cap suffices. Callers that pass no
+# cache_key always recompute — behaviour unchanged.
+_UNIQUE_SURNAMES_CACHE: dict = {}
+_UNIQUE_SURNAMES_CACHE_MAX = 16
+
+
+def count_unique_family_surnames(db, max_scan=20000, *, cache_key=None):
     """Count distinct family surnames in the database, accurately.
 
     Iterates people and uses :func:`get_family_surname` (patronymic excluded)
@@ -116,7 +126,23 @@ def count_unique_family_surnames(db, max_scan=20000):
     surname are not miscounted and gender forms count once. Falls back to the
     cheaper (and slightly looser) ``get_surname_list()`` based count on trees
     larger than ``max_scan`` people to avoid a full scan on huge databases.
+
+    When ``cache_key`` is given, the result is memoized under it (see
+    ``_UNIQUE_SURNAMES_CACHE``), so repeat dashboard loads of an unchanged tree
+    skip the full people scan (which is ~200ms on an ~11k-person tree).
     """
+    if cache_key is not None and cache_key in _UNIQUE_SURNAMES_CACHE:
+        return _UNIQUE_SURNAMES_CACHE[cache_key]
+    result = _count_unique_family_surnames(db, max_scan)
+    if cache_key is not None:
+        if len(_UNIQUE_SURNAMES_CACHE) >= _UNIQUE_SURNAMES_CACHE_MAX:
+            _UNIQUE_SURNAMES_CACHE.clear()
+        _UNIQUE_SURNAMES_CACHE[cache_key] = result
+    return result
+
+
+def _count_unique_family_surnames(db, max_scan):
+    """Do the actual scan for :func:`count_unique_family_surnames`."""
     try:
         n_people = db.get_number_of_people()
     except Exception:  # pylint: disable=broad-except
