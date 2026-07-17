@@ -77,9 +77,12 @@ class RelationResource(ProtectedResource, GrampsJSONEncoder):
         except HandleError:
             abort_with_message(404, f"Person {handle2} not found")
 
-        db_handle.cache_people()
-        db_handle.cache_families()
-
+        # NB: do NOT eagerly cache_people()/cache_families() here. A single
+        # relationship only walks the ancestors of the two people (a few
+        # hundred at most); the proxy caches those lazily as they are fetched.
+        # Pre-loading the WHOLE tree instead is O(people+families) and on a
+        # large tree dwarfs the computation itself — e.g. ~1s of caching vs
+        # <3ms of actual relationship calculation on an ~11k-person tree.
         locale = get_locale_for_language(args["locale"], default=True)
         data = get_one_relationship(
             db_handle=db_handle,
@@ -118,9 +121,10 @@ class RelationsResource(ProtectedResource, GrampsJSONEncoder):
         except HandleError:
             abort_with_message(404, f"Person {handle2} not found")
 
-        db_handle.cache_people()
-        db_handle.cache_families()
-
+        # See RelationResource above: skip the whole-tree eager cache; the
+        # calculator walks only the two people's ancestors, which the proxy
+        # caches lazily. Eager-caching every person/family dominates runtime on
+        # large trees for no benefit.
         locale = get_locale_for_language(args["locale"], default=True)
         calc = get_relationship_calculator(reinit=True, clocale=locale)
         calc.set_depth(args["depth"])
