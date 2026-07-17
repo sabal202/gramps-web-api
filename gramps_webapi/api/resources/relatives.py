@@ -137,9 +137,11 @@ class RelativesResource(ProtectedResource, GrampsJSONEncoder):
                     "No home person set and no ?handle= provided",
                 )
 
-        db_handle.cache_people()
-        db_handle.cache_families()
-
+        # NB: no eager cache_people()/cache_families(). The kinship engine only
+        # visits the anchor's relatives (bounded by family size), which the
+        # proxy caches lazily as they are fetched. Pre-loading the whole tree is
+        # O(people+families) and, on a large tree, dwarfs the computation — e.g.
+        # ~1s of caching vs a few ms of actual kinship work on an ~11k tree.
         locale = get_locale_for_language(args.get("locale"), default=True)
 
         # Run the kinship engine
@@ -230,9 +232,9 @@ class CommonAncestorsResource(ProtectedResource, GrampsJSONEncoder):
                     },
                 )
 
-        db_handle.cache_people()
-        db_handle.cache_families()
-
+        # See RelativesResource: skip the whole-tree eager cache; only the two
+        # people's ancestors are visited (cached lazily by the proxy). Eager
+        # caching every person/family dominates runtime on large trees.
         locale = get_locale_for_language(args.get("locale"), default=True)
 
         # Run the kinship engine
