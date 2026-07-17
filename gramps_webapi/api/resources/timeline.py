@@ -40,7 +40,7 @@ from webargs import fields, validate
 
 from ...types import Handle
 from ..blueprint import api_blueprint
-from ..util import get_db_handle, get_locale_for_language
+from ..util import abort_with_message, get_db_handle, get_locale_for_language
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
 from .filters import apply_filter
@@ -56,6 +56,13 @@ from .util import (
 pd = PlaceDisplay()
 default_locale = GrampsLocale(lang="en")
 event_type = EventType()
+
+# An anchored people-timeline computes a relationship (get_one_relationship, a
+# per-person graph walk) for EVERY person in the set. Without an explicit
+# handles/filter the set defaults to the whole tree, so an anchored request
+# would fan out over every person — minutes of work (or a hang) on a large
+# tree. Cap it and fail fast with guidance instead.
+MAX_ANCHORED_TIMELINE_PEOPLE = 500
 
 DEATH_INDICATORS = [
     event_type.DEATH,
@@ -983,6 +990,14 @@ class TimelinePeopleResource(ProtectedResource, GrampsJSONEncoder):
                 handles = apply_filter(db_handle, args, "Person", handles)
 
             if "anchor" in args:
+                if len(handles) > MAX_ANCHORED_TIMELINE_PEOPLE:
+                    abort_with_message(
+                        422,
+                        "An anchored people-timeline computes a relationship "
+                        "per person and is limited to "
+                        f"{MAX_ANCHORED_TIMELINE_PEOPLE} people; narrow the set "
+                        "with handles, filter or rules.",
+                    )
                 for handle in handles:
                     timeline.add_relative(handle)
             else:
