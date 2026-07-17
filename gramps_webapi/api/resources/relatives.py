@@ -44,6 +44,7 @@ from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
 
 from ...types import Handle
 from ..blueprint import api_blueprint
+from ..cache import request_cache_decorator
 from ..util import abort_with_message, get_db_handle, get_locale_for_language
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
@@ -117,6 +118,7 @@ class RelativesResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, RelativesSchema())
     @api_blueprint.arguments(RelativesQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict) -> Response:
         """Get relatives of the home person (``?handle=`` override), grouped."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
@@ -193,6 +195,7 @@ class CommonAncestorsResource(ProtectedResource, GrampsJSONEncoder):
 
     @api_blueprint.response(200, CommonAncestorsSchema())
     @api_blueprint.arguments(CommonAncestorsQueryArgs, location="query")
+    @request_cache_decorator
     def get(self, args: Dict, handle: Handle) -> Response:
         """Get common ancestors of ``handle`` and home person (``?to=`` overrides)."""
         db_handle = CachePeopleFamiliesProxy(get_db_handle())
