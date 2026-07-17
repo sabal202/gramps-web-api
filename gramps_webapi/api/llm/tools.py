@@ -31,7 +31,9 @@ from pydantic_ai import RunContext
 from ..people_families_cache import CachePeopleFamiliesProxy
 from ..resources.anniversaries import upcoming_anniversaries
 from ..resources.filters import apply_filter
+from ..cache import get_db_last_change_timestamp
 from ..resources.graph_analysis import (
+    cached_tree_graph,
     centrality,
     components,
     connectivity,
@@ -1074,6 +1076,25 @@ def _open_cached_db(ctx: RunContext[AgentDeps]):
     return proxy, raw
 
 
+def _tree_graph(ctx: RunContext[AgentDeps], db_handle):
+    """Build-or-reuse the whole-tree graph for the current chat turn.
+
+    Every graph tool otherwise rebuilds the tree graph internally, so a turn
+    that runs several of them re-scans the whole tree once per tool. Reuse one
+    build via the process-level memo, keyed by tree + last-change timestamp +
+    privacy view (a private-viewer's graph differs from a guest's). Falls back
+    to an uncached build when the timestamp is unknown (staleness can't be ruled
+    out).
+    """
+    timestamp = get_db_last_change_timestamp(ctx.deps.tree)
+    key = (
+        None
+        if timestamp is None
+        else (ctx.deps.tree, timestamp, bool(ctx.deps.include_private))
+    )
+    return cached_tree_graph(db_handle, cache_key=key)
+
+
 def _fmt_life_dates(profile: dict[str, Any]) -> str:
     """Return a compact ' (b. …; d. …)' suffix from a person profile, or ''."""
 
@@ -1930,7 +1951,11 @@ def analyze_tree_connectivity(
     try:
         db_handle, raw = _open_cached_db(ctx)
         locale = _tool_locale()
-        result = connectivity(db_handle, include_singletons=include_orphans)
+        result = connectivity(
+            db_handle,
+            include_singletons=include_orphans,
+            g=_tree_graph(ctx, db_handle),
+        )
 
         def _samples(handles: list[str], limit: int = 3) -> list[str]:
             lines: list[str] = []
@@ -2045,7 +2070,12 @@ def get_deepest_ancestors(
 
         locale = _tool_locale()
         result = deepest_ancestors(
-            db_handle, anchor, generations=generations, birth_only=birth_only, top=top
+            db_handle,
+            anchor,
+            generations=generations,
+            birth_only=birth_only,
+            top=top,
+            g=_tree_graph(ctx, db_handle),
         )
         anchor_line = _person_line(db_handle, anchor, locale)
 
@@ -2133,7 +2163,11 @@ def analyze_lineages(
         db_handle, raw = _open_cached_db(ctx)
         locale = _tool_locale()
         result = lineages(
-            db_handle, birth_only=birth_only, group_by=group_by, min_size=min_size
+            db_handle,
+            birth_only=birth_only,
+            group_by=group_by,
+            min_size=min_size,
+            g=_tree_graph(ctx, db_handle),
         )
 
         out = [
@@ -2323,7 +2357,9 @@ def find_key_people(
     try:
         db_handle = _open_db(ctx)
         locale = _tool_locale()
-        result = centrality(db_handle, metric=metric, top=top)
+        result = centrality(
+            db_handle, metric=metric, top=top, g=_tree_graph(ctx, db_handle)
+        )
 
         people = result["people"]
         if not people:
@@ -2481,7 +2517,9 @@ def describe_tree_components(
     try:
         db_handle, raw = _open_cached_db(ctx)
         locale = _tool_locale()
-        comps = components(db_handle)  # all components, ranked largest-first
+        comps = components(
+            db_handle, g=_tree_graph(ctx, db_handle)
+        )  # all components, ranked largest-first
         if not comps:
             return "The tree has no people, so there are no components."
 
@@ -2583,7 +2621,9 @@ def get_tree_component(
     try:
         db_handle, raw = _open_cached_db(ctx)
         locale = _tool_locale()
-        comps = components(db_handle)  # all components, ranked largest-first
+        comps = components(
+            db_handle, g=_tree_graph(ctx, db_handle)
+        )  # all components, ranked largest-first
         if not comps:
             return "The tree has no people, so there are no components."
 
