@@ -3033,6 +3033,18 @@ class GraphNodeSchema(_Base):
         allow_none=True,
         metadata={"description": "Year of the death event, if known."},
     )
+    tags = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Indices into the response's top-level 'tags' list."
+        },
+    )
+    citations = fields.Int(
+        metadata={
+            "description": "Number of citations on the person and their "
+            "events (a rough sourcing-quality measure)."
+        },
+    )
 
 
 class GraphLinkSchema(_Base):
@@ -3061,5 +3073,11 @@ class GraphSchema(_Base):
         metadata={
             "description": "Edges between nodes: spouse↔spouse and "
             "parent↔child, deduplicated, as indices into 'people'."
+        },
+    )
+    tags = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Tag names referenced by the nodes' 'tags' indices."
         },
     )
