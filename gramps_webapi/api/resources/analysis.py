@@ -471,6 +471,37 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
                     out.append(label)
             return out
 
+        # tag names are shared via a top-level list; nodes carry indices
+        tag_names: List[str] = []
+        tag_index: Dict[str, int] = {}
+
+        def _tags(person) -> List[int]:
+            out: List[int] = []
+            for tag_handle in person.get_tag_list():
+                if tag_handle not in tag_index:
+                    try:
+                        tag = db_handle.get_tag_from_handle(tag_handle)
+                    except HandleError:
+                        continue
+                    if tag is None:
+                        continue
+                    tag_index[tag_handle] = len(tag_names)
+                    tag_names.append(tag.get_name())
+                out.append(tag_index[tag_handle])
+            return out
+
+        def _citation_count(person) -> int:
+            """Citations on the person plus on their events."""
+            count = len(person.get_citation_list())
+            for event_ref in person.get_event_ref_list():
+                try:
+                    event = db_handle.get_event_from_handle(event_ref.ref)
+                except HandleError:
+                    continue
+                if event is not None:
+                    count += len(event.get_citation_list())
+            return count
+
         people: List[Dict[str, Any]] = []
         index: Dict[str, int] = {}
         for handle in db_handle.get_person_handles():
@@ -492,6 +523,8 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
                     "gender": person.gender,
                     "birth_year": _event_year(person.get_birth_ref()),
                     "death_year": _event_year(person.get_death_ref()),
+                    "tags": _tags(person),
+                    "citations": _citation_count(person),
                 }
             )
 
@@ -520,4 +553,6 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
                 _add_link(father, child, "child")
                 _add_link(mother, child, "child")
 
-        return self.response(200, {"people": people, "links": links})
+        return self.response(
+            200, {"people": people, "links": links, "tags": tag_names}
+        )
