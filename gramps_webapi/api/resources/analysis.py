@@ -38,6 +38,11 @@ Four endpoints built on top of the graph engine in ``graph_analysis.py``
 ``GET /api/analysis/graph/``
     Whole-tree graph export (light person nodes + typed edges) for
     client-side graph visualizations.
+
+``GET /api/analysis/semantic-map/``
+    2D layout of all people by semantic similarity of their vector
+    embeddings (from the semantic search index), for "semantic proximity"
+    graph layouts.
 """
 
 from __future__ import annotations
@@ -68,6 +73,8 @@ from .schemas import (
     IntegritySchema,
     LineagesQueryArgs,
     LineagesSchema,
+    SemanticMapQueryArgs,
+    SemanticMapSchema,
 )
 from .util import get_person_profile_for_object
 
@@ -556,3 +563,124 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
         return self.response(
             200, {"people": people, "links": links, "tags": tag_names}
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/analysis/semantic-map/
+# ---------------------------------------------------------------------------
+
+
+class SemanticMapResource(ProtectedResource, GrampsJSONEncoder):
+    """2D semantic-similarity layout of all people.
+
+    Reads the per-person vector embeddings from the semantic search index
+    (the same ones powering semantic search / AI chat retrieval) and reduces
+    them to two dimensions — UMAP when available, PCA otherwise. Coordinates
+    are normalized to roughly [-1, 1] per axis. Privacy: users without the
+    view-private permission get the public-only embedding collection.
+    """
+
+    @api_blueprint.response(200, SemanticMapSchema())
+    @api_blueprint.arguments(SemanticMapQueryArgs, location="query")
+    @request_cache_decorator
+    def get(self, args: Dict) -> Response:
+        """Get a 2D semantic-similarity map of all people."""
+        import numpy as np
+
+        from ..auth import has_permissions
+        from ..search import get_semantic_search_indexer
+        from ...auth.const import PERM_VIEW_PRIVATE
+        from ..util import get_tree_from_jwt
+
+        tree = get_tree_from_jwt()
+        try:
+            indexer = get_semantic_search_indexer(tree)
+        except ValueError:
+            abort_with_message(501, "Semantic search index is not configured")
+        collection = (
+            indexer.index
+            if has_permissions({PERM_VIEW_PRIVATE})
+            else indexer.index_public
+        )
+
+        handles: List[str] = []
+        vectors: List[Any] = []
+        import json as _json
+
+        with collection.conn() as conn:
+            placeholder = collection.PLACEHOLDER
+            cursor = conn.execute(
+                "SELECT metadata, embedding FROM documents "
+                f"WHERE name = {placeholder} AND embedding IS NOT NULL "
+                "AND id LIKE 'person_%'",
+                (collection.name,),
+            )
+            for metadata, embedding in cursor.fetchall():
+                try:
+                    meta = (
+                        _json.loads(metadata)
+                        if isinstance(metadata, str)
+                        else metadata
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if not meta or meta.get("type") != "person":
+                    continue
+                handle = meta.get("handle")
+                if not handle:
+                    continue
+                if isinstance(embedding, (bytes, memoryview)):
+                    vector = np.frombuffer(bytes(embedding), dtype=np.float32)
+                else:
+                    vector = np.asarray(embedding, dtype=np.float32)
+                handles.append(handle)
+                vectors.append(vector)
+
+        if len(handles) < 3:
+            return self.response(
+                200, {"method": "none", "people": []}
+            )
+
+        matrix = np.vstack(vectors).astype(np.float32)
+        method = args["method"]
+        coords: Any = None
+        if method in ("auto", "umap"):
+            try:
+                import umap  # type: ignore
+
+                reducer = umap.UMAP(
+                    n_components=2,
+                    n_neighbors=15,
+                    min_dist=0.1,
+                    metric="cosine",
+                    random_state=42,
+                )
+                coords = reducer.fit_transform(matrix)
+                method = "umap"
+            except ImportError:
+                if method == "umap":
+                    abort_with_message(501, "umap-learn is not installed")
+                method = "pca"
+        if coords is None:
+            centered = matrix - matrix.mean(axis=0)
+            cov = centered.T @ centered
+            _eigvals, eigvecs = np.linalg.eigh(cov)
+            coords = centered @ eigvecs[:, -2:]
+            method = "pca"
+
+        # robust per-axis normalization to ~[-1, 1] (98th percentile of |v|)
+        coords = np.asarray(coords, dtype=np.float64)
+        coords = coords - coords.mean(axis=0)
+        scale = np.percentile(np.abs(coords), 98, axis=0)
+        scale[scale == 0] = 1.0
+        coords = np.clip(coords / scale, -1.5, 1.5)
+
+        people = [
+            {
+                "handle": handle,
+                "x": float(coords[i, 0]),
+                "y": float(coords[i, 1]),
+            }
+            for i, handle in enumerate(handles)
+        ]
+        return self.response(200, {"method": method, "people": people})

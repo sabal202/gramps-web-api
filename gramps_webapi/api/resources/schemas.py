@@ -3081,3 +3081,45 @@ class GraphSchema(_Base):
             "description": "Tag names referenced by the nodes' 'tags' indices."
         },
     )
+
+
+class SemanticMapQueryArgs(Schema):
+    """Query arguments for the /analysis/semantic-map/ endpoint."""
+
+    method = fields.Str(
+        load_default="auto",
+        validate=validate.OneOf(["auto", "umap", "pca"]),
+        metadata={
+            "description": "Dimensionality-reduction method. 'auto' uses "
+            "UMAP when installed and falls back to PCA."
+        },
+    )
+
+
+class SemanticMapPointSchema(_Base):
+    """One person's position on the semantic-similarity map."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the person."},
+    )
+    x = fields.Float(
+        metadata={"description": "Normalized x coordinate (roughly -1..1)."},
+    )
+    y = fields.Float(
+        metadata={"description": "Normalized y coordinate (roughly -1..1)."},
+    )
+
+
+class SemanticMapSchema(_Base):
+    """Response schema for GET /api/analysis/semantic-map/."""
+
+    method = fields.Str(
+        metadata={
+            "description": "Reduction method actually used: 'umap', 'pca' "
+            "or 'none' (too few embeddings)."
+        },
+    )
+    people = fields.List(
+        fields.Nested(SemanticMapPointSchema),
+        metadata={"description": "People with map coordinates."},
+    )

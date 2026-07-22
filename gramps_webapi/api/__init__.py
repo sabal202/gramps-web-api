@@ -36,6 +36,7 @@ from .resources.bookmarks import (
 )
 from .resources.access_tokens import UserAccessTokenResource
 from .resources.analysis import (
+    SemanticMapResource,
     CentralityResource,
     ConnectivityResource,
     GraphResource,
@@ -689,6 +690,12 @@ register_endpt(
     GraphResource,
     "/analysis/graph/",
     "analysis_graph",
+    tags=["Analysis"],
+)
+register_endpt(
+    SemanticMapResource,
+    "/analysis/semantic-map/",
+    "analysis_semantic_map",
     tags=["Analysis"],
 )
 
