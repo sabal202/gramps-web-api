@@ -3291,6 +3291,31 @@ class GraphNodeSchema(_Base):
     surname = fields.Str(
         metadata={"description": "Surname (primary name, all surnames joined)."},
     )
+    family_surname = fields.Str(
+        metadata={
+            "description": "Primary surname without patronymic-origin entries."
+        },
+    )
+    patronymic = fields.Str(
+        metadata={
+            "description": "Patronymic-origin surname entries of the primary "
+            "name, if any."
+        },
+    )
+    maiden_surname = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Birth surname of a woman whose primary name is a "
+            "married name (differs from the current surname), else null."
+        },
+    )
+    alt_names = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Distinct 'Given Surname' strings of alternate "
+            "names (birth names, AKA, spelling variants) for name matching."
+        },
+    )
     gender = fields.Int(
         metadata={
             "description": "Gramps gender code: 0 female, 1 male, 2 unknown, "

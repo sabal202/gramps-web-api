@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional
 from flask import Response
 from gramps.gen.db import DbReadBase
 from gramps.gen.errors import HandleError
-from gramps.gen.lib import Person
+from gramps.gen.lib import NameOriginType, NameType, Person
 from gramps.gen.utils.grampslocale import GrampsLocale
 
 from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
@@ -417,6 +417,60 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
             year = event.get_date_object().get_year()
             return year or None
 
+        def _family_surname(name) -> str:
+            """Surname without patronymic-origin entries."""
+            return " ".join(
+                s.get_surname()
+                for s in name.get_surname_list()
+                if int(s.get_origintype()) != NameOriginType.PATRONYMIC
+                and s.get_surname()
+            )
+
+        def _patronymic(name) -> str:
+            return " ".join(
+                s.get_surname()
+                for s in name.get_surname_list()
+                if int(s.get_origintype()) == NameOriginType.PATRONYMIC
+                and s.get_surname()
+            )
+
+        def _maiden_surname(person, primary) -> Optional[str]:
+            """Birth surname of a woman whose primary name is a married name.
+
+            Mirrors the frontend's getMaidenSurname (used by the maiden-name
+            chart toggle): female + primary name typed 'Married Name' + a
+            'Birth Name' alternate whose non-patronymic surname differs.
+            """
+            if person.gender != Person.FEMALE:
+                return None
+            if int(primary.get_type()) != NameType.MARRIED:
+                return None
+            for alt in person.get_alternate_names():
+                if int(alt.get_type()) == NameType.BIRTH:
+                    maiden = _family_surname(alt)
+                    if maiden and maiden != _family_surname(primary):
+                        return maiden
+                    return None
+            return None
+
+        def _alt_names(person, primary) -> List[str]:
+            """Distinct 'Given Surname' strings of alternate names.
+
+            Lets clients match people by any recorded name variant (birth
+            name, AKA, spelling variants), not just the primary one.
+            """
+            primary_key = f"{primary.get_first_name()} {_family_surname(primary)}"
+            out: List[str] = []
+            for alt in person.get_alternate_names():
+                label = " ".join(
+                    part
+                    for part in (alt.get_first_name(), _family_surname(alt))
+                    if part
+                ).strip()
+                if label and label != primary_key and label not in out:
+                    out.append(label)
+            return out
+
         people: List[Dict[str, Any]] = []
         index: Dict[str, int] = {}
         for handle in db_handle.get_person_handles():
@@ -431,6 +485,10 @@ class GraphResource(ProtectedResource, GrampsJSONEncoder):
                     "gramps_id": person.gramps_id,
                     "given_name": name.get_first_name(),
                     "surname": name.get_surname(),
+                    "family_surname": _family_surname(name),
+                    "patronymic": _patronymic(name),
+                    "maiden_surname": _maiden_surname(person, name),
+                    "alt_names": _alt_names(person, name),
                     "gender": person.gender,
                     "birth_year": _event_year(person.get_birth_ref()),
                     "death_year": _event_year(person.get_death_ref()),
