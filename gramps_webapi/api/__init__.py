@@ -37,6 +37,7 @@ from .resources.bookmarks import (
 from .resources.analysis import (
     CentralityResource,
     ConnectivityResource,
+    GraphResource,
     IntegrityResource,
     LineagesResource,
 )
@@ -716,6 +717,12 @@ register_endpt(
     CentralityResource,
     "/analysis/centrality/",
     "analysis_centrality",
+    tags=["Analysis"],
+)
+register_endpt(
+    GraphResource,
+    "/analysis/graph/",
+    "analysis_graph",
     tags=["Analysis"],
 )
 
