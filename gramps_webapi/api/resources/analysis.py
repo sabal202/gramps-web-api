@@ -34,6 +34,10 @@ Four endpoints built on top of the graph engine in ``graph_analysis.py``
 
 ``GET /api/analysis/centrality/``
     Structurally important ("key"/"bridge") people, by centrality metric.
+
+``GET /api/analysis/graph/``
+    Whole-tree graph export (light person nodes + typed edges) for
+    client-side graph visualizations.
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ from .schemas import (
     CentralitySchema,
     ConnectivityQueryArgs,
     ConnectivitySchema,
+    GraphSchema,
     IntegrityQueryArgs,
     IntegritySchema,
     LineagesQueryArgs,
@@ -375,3 +380,86 @@ class CentralityResource(ProtectedResource, GrampsJSONEncoder):
                 "people": people,
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/analysis/graph/
+# ---------------------------------------------------------------------------
+
+
+class GraphResource(ProtectedResource, GrampsJSONEncoder):
+    """Whole-tree graph export for client-side graph visualizations.
+
+    Returns every visible person as a light node (name, gender, birth/death
+    year) plus deduplicated typed edges (spouse↔spouse, parent↔child, as
+    indices into the node list). Privacy filtering comes for free: nodes are
+    seeded from the proxied ``get_person_handles()``, and edges whose endpoint
+    is not in the node set (e.g. a private spouse) are dropped.
+    """
+
+    @api_blueprint.response(200, GraphSchema())
+    @request_cache_decorator
+    def get(self) -> Response:
+        """Get the whole tree as a graph of light person nodes and typed edges."""
+        db_handle = CachePeopleFamiliesProxy(get_db_handle())
+        db_handle.cache_people()
+        db_handle.cache_families()
+
+        def _event_year(ref) -> Optional[int]:
+            if ref is None:
+                return None
+            try:
+                event = db_handle.get_event_from_handle(ref.ref)
+            except HandleError:
+                return None
+            if event is None:
+                return None
+            year = event.get_date_object().get_year()
+            return year or None
+
+        people: List[Dict[str, Any]] = []
+        index: Dict[str, int] = {}
+        for handle in db_handle.get_person_handles():
+            person = db_handle.get_person_from_handle(handle)
+            if person is None:
+                continue
+            name = person.get_primary_name()
+            index[handle] = len(people)
+            people.append(
+                {
+                    "handle": handle,
+                    "gramps_id": person.gramps_id,
+                    "given_name": name.get_first_name(),
+                    "surname": name.get_surname(),
+                    "gender": person.gender,
+                    "birth_year": _event_year(person.get_birth_ref()),
+                    "death_year": _event_year(person.get_death_ref()),
+                }
+            )
+
+        links: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def _add_link(a: Optional[str], b: Optional[str], type_: str) -> None:
+            source = index.get(a) if a else None
+            target = index.get(b) if b else None
+            if source is None or target is None or source == target:
+                return
+            key = (source, target, type_)
+            if key in seen:
+                return
+            seen.add(key)
+            links.append({"source": source, "target": target, "type": type_})
+
+        for family in db_handle.iter_families():
+            father = family.get_father_handle()
+            mother = family.get_mother_handle()
+            _add_link(father, mother, "spouse")
+            for cref in family.get_child_ref_list():
+                child = cref.ref
+                if not child:
+                    continue
+                _add_link(father, child, "child")
+                _add_link(mother, child, "child")
+
+        return self.response(200, {"people": people, "links": links})

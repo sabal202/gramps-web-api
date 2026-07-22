@@ -2977,3 +2977,64 @@ class CentralitySchema(_Base):
         fields.Nested(CentralityPersonSchema),
         metadata={"description": "Ranked people, highest score first."},
     )
+
+
+class GraphNodeSchema(_Base):
+    """One person node in the whole-tree graph export."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Gramps ID of the person."},
+    )
+    given_name = fields.Str(
+        metadata={"description": "First/given name (primary name)."},
+    )
+    surname = fields.Str(
+        metadata={"description": "Surname (primary name, all surnames joined)."},
+    )
+    gender = fields.Int(
+        metadata={
+            "description": "Gramps gender code: 0 female, 1 male, 2 unknown, "
+            "3 other."
+        },
+    )
+    birth_year = fields.Int(
+        allow_none=True,
+        metadata={"description": "Year of the birth event, if known."},
+    )
+    death_year = fields.Int(
+        allow_none=True,
+        metadata={"description": "Year of the death event, if known."},
+    )
+
+
+class GraphLinkSchema(_Base):
+    """One edge in the whole-tree graph export."""
+
+    source = fields.Int(
+        metadata={"description": "Index of the source node in 'people'."},
+    )
+    target = fields.Int(
+        metadata={"description": "Index of the target node in 'people'."},
+    )
+    type = fields.Str(
+        metadata={"description": "Edge type: 'spouse' or 'child'."},
+    )
+
+
+class GraphSchema(_Base):
+    """Response schema for GET /api/analysis/graph/."""
+
+    people = fields.List(
+        fields.Nested(GraphNodeSchema),
+        metadata={"description": "All (visible) people as graph nodes."},
+    )
+    links = fields.List(
+        fields.Nested(GraphLinkSchema),
+        metadata={
+            "description": "Edges between nodes: spouse↔spouse and "
+            "parent↔child, deduplicated, as indices into 'people'."
+        },
+    )
