@@ -35,6 +35,7 @@ from .resources.bookmarks import (
     BookmarksResource,
 )
 from .resources.analysis import (
+    SemanticMapResource,
     CentralityResource,
     ConnectivityResource,
     GraphResource,
@@ -723,6 +724,12 @@ register_endpt(
     GraphResource,
     "/analysis/graph/",
     "analysis_graph",
+    tags=["Analysis"],
+)
+register_endpt(
+    SemanticMapResource,
+    "/analysis/semantic-map/",
+    "analysis_semantic_map",
     tags=["Analysis"],
 )
 
