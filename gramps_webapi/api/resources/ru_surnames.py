@@ -155,3 +155,32 @@ def _count_unique_family_surnames(db, max_scan):
                 seen.add(surname)
         return len(seen)
     return count_unique_surnames(db.get_surname_list() or [])
+
+
+def get_maiden_surname(person) -> str | None:
+    """Maiden (birth) surname for a woman whose primary name is her married one.
+
+    Mirrors the frontend ``getMaidenSurname`` rule: the primary name must be
+    typed "Married Name", an alternate "Birth Name" must exist, and its
+    family surname (patronymic excluded) must differ from the current one.
+    Returns ``None`` when there is nothing meaningful to show.
+    """
+    try:
+        if person.gender != person.FEMALE:
+            return None
+    except AttributeError:
+        return None
+    primary = person.primary_name
+    if str(primary.type) != "Married Name":
+        return None
+    birth_name = None
+    for name in person.alternate_names or []:
+        if str(name.type) == "Birth Name":
+            birth_name = name
+            break
+    if birth_name is None:
+        return None
+    maiden = get_family_surname(birth_name)
+    if not maiden or maiden == get_family_surname(primary):
+        return None
+    return maiden

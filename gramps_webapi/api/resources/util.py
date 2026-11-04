@@ -95,7 +95,11 @@ from ..util import (
 from .db_backend import SINGLE_TREE_DBAPI_CLASS_NAMES
 from .inlaw import inlaw_relationship as _inlaw_relationship
 from .marital_status import get_marital_status
-from .ru_surnames import get_family_surname, get_patronymic
+from .ru_surnames import (
+    get_family_surname,
+    get_maiden_surname,
+    get_patronymic,
+)
 
 pd = PlaceDisplay()
 _ = glocale.translation.gettext
@@ -891,6 +895,7 @@ def get_person_profile_for_object(
         "name_given": name_displayer.display_given(person),
         "name_surname": get_family_surname(person.primary_name),
         "name_patronymic": get_patronymic(person.primary_name),
+        "maiden_surname": get_maiden_surname(person),
         "name_display": (
             name_displayer.format_str(person.get_primary_name(), name_format)
             if name_format

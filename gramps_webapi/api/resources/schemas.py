@@ -457,6 +457,10 @@ class PersonProfileSchema(_Base):
     name_patronymic = fields.Str(
         metadata={"description": "Patronymic (отчество), if any."},
     )
+    maiden_surname = fields.Str(
+        metadata={"description": "Maiden (birth) surname when the primary name "
+        "is a married name; null otherwise."},
+    )
     name_surname = fields.Str(
         metadata={"description": "Surname."},
     )
