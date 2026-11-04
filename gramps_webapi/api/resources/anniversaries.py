@@ -698,6 +698,7 @@ def upcoming_anniversaries(
     event_types: Optional[list[str]] = None,
     anchor_gramps_id: Optional[str] = None,
     generation_depth: int = 4,
+    locale: GrampsLocale = glocale,
 ) -> list[dict[str, Any]]:
     """Return events whose yearly anniversary falls within the next *within_days*.
 
@@ -752,7 +753,7 @@ def upcoming_anniversaries(
         event = db_handle.get_event_from_handle(handle)
         if event is None:
             continue
-        if not _event_matches_type(event, allowed_types):
+        if not _event_matches_type(event, allowed_types, locale):
             continue
         components = _get_anniversary_date_components(event)
         if components is None:
