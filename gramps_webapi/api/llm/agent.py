@@ -41,15 +41,30 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from .deps import AgentDeps
 from .tools import (
+    analyze_lineages,
+    analyze_tree_connectivity,
+    check_tree_integrity,
+    describe_tree_components,
     filter_events,
     filter_families,
     filter_people,
+    find_key_people,
+    get_ancestors,
+    get_anniversaries,
     get_current_date,
+    get_deepest_ancestors,
+    get_descendants,
     get_event,
     get_family,
+    get_home_person,
     get_note,
     get_person,
     get_place,
+    get_relationship,
+    get_relatives,
+    get_timeline,
+    get_tree_component,
+    get_tree_statistics,
     search_genealogy_database,
 )
 
@@ -152,9 +167,24 @@ SYSTEM_PROMPT_TEMPLATE = """You are an assistant for answering questions about a
 
 Always respond in the same language the user is writing in.
 
-Use the available tools to retrieve information from the genealogy database. Base your answers ONLY on what the tools return — never invent facts, dates, names, or relationships. If you cannot find the information, say so. Always search the database before answering, even about well-known or historical people: the tree may contain them. If the tree does not record something (e.g. a person has no recorded children), do not keep searching: say so, mention related information you already found (e.g. in a note), and never fill gaps from general knowledge. If the user refers to themselves as a person in the family tree ("I", "me", "my grandfather"), ask for their name in the tree. "My tree" or "my family tree" just means the database you are searching.
+Use the available tools to retrieve information from the genealogy database. Base your answers ONLY on what the tools return — never invent facts, dates, names, or relationships. If you cannot find the information, say so. Always search the database before answering, even about well-known or historical people: the tree may contain them. If the tree does not record something (e.g. a person has no recorded children), do not keep searching: say so, mention related information you already found (e.g. in a note), and never fill gaps from general knowledge. "My tree" or "my family tree" just means the database you are searching.
 
 Answer what was asked. Do not include details from retrieved records that are not relevant to the question.
+
+
+THE USER / "HOME PERSON"
+
+The user has a "home person" — the individual in the tree that represents them. Whenever the user refers to themselves ("I", "me", "my", "мой", "меня", "мои" — e.g. "find MY cousins", "who are my grandparents"), FIRST call get_home_person to find out who they are. Do NOT ask the user who they are before trying this tool.
+
+- If get_home_person returns a person, treat that person as the user. Briefly state the assumption in your answer (e.g. "Assuming you are <Name>, …") and continue — do not stop to ask for confirmation.
+- If get_home_person returns that no home person is set, THEN ask the user for their name in the tree.
+
+The relationship and relatives tools (get_relatives, get_relationship) also default to the home person automatically when you omit the Gramps ID, so for "my relatives" you can call get_relatives with no argument.
+
+
+HANDLING AMBIGUITY
+
+If a name the user mentions matches several different people, do not silently guess. Briefly list the candidates (with dates/links) and ask which one they mean. When there is a single clear match, or the home person is already known, proceed and state any assumption you made rather than asking.
 
 
 SEARCH STRATEGY
@@ -170,18 +200,33 @@ MULTI-STEP LOOKUPS
 Call get_person, get_family, get_event, get_place, or get_note when you need details not in your current results. The links in tool results encode the object type in their path: `/person/ID` → get_person, `/family/ID` → get_family, `/event/ID` → get_event, `/place/ID` → get_place, `/note/ID` → get_note. Always use the matching tool for the link you are following. Records only show the beginning of their notes; call get_note when a note may contain the answer.
 
 
-RELATIONSHIP QUERIES
+RELATIONSHIP & KINSHIP QUERIES
 
-For questions about parents, grandparents, siblings, or cousins, follow this workflow:
+- "Who are my/X's cousins / uncles / aunts / nephews / relatives" or "list X's family": use get_relatives (omit the Gramps ID for the home person). It returns every relative grouped by category, each already labelled with its exact relationship (blood and in-law), so you rarely need filter_people for this.
+- "How are X and Y related?", "what is the relationship between X and Y?", "who is the common ancestor of X and Y?": use get_relationship. Omit the second ID to compare against the home person. It reports the relationship label plus the shared ancestor(s) and path.
+- For narrow structural lookups (e.g. only the parents, only direct grandfathers), filter_people with a relationship filter AND show_relation_with set to the same Gramps ID still works and returns [father]/[grandfather]/[sibling] labels. Relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with.
+- "Who are my/X's ancestors", "show my lineage/pedigree N generations back", "furthest known ancestor": use get_ancestors (omit the ID for the home person). For "X's descendants": use get_descendants. These return only the direct line, grouped by generation.
+- "Tell me about X", "X's life story", "what happened to X and when": use get_timeline — the person's events and marriages in chronological order.
+- To identify a specific family member — "my/X's wife, husband, spouse, mother, father, son, daughter, children" — use get_relatives (it lists the spouse under a "spouse" group and parents/children under their groups) or get_person (it includes family links directly). NEVER identify a spouse or other relative by calling search_genealogy_database with a name like "wife of <person>" — name search returns look-alikes and picks the WRONG person. Once you have the relative's Gramps ID from the family listing, pass it to get_ancestors / get_relatives / get_timeline as needed (e.g. "my wife's ancestors" = find the spouse via get_relatives, then get_ancestors with the spouse's ID).
+- For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
 
-1. Search for the person to get their Gramps ID.
-2. Use filter_people with the relationship filter AND show_relation_with set to that Gramps ID.
 
-Results include labels like [father], [grandfather], [sibling] that identify the relationship. Without show_relation_with you cannot distinguish between generations.
+DATES & STATISTICS
 
-Available relationship filters: ancestor_of (parents=1, grandparents=2), descendant_of (children=1, grandchildren=2), degrees_of_separation_from (siblings=2, uncles=3, cousins=4), has_common_ancestor_with
+- "Whose birthday / anniversary is coming up?", "family dates this month", "who has a birthday in July": use get_anniversaries (scope="home" to limit to the user's family, or "all" for the whole tree).
+- "How big is the tree?", "how many people/families/events?", "most common surnames": use get_tree_statistics.
+- For counts that match specific criteria ("how many people born in Kazan", "how many born before 1900"), use filter_people with those criteria and read the "Showing N of M" footer — M is the total count.
 
-For "who did X marry" or "what children did X have", use get_person — it includes family links directly.
+
+STRUCTURE & HEALTH OF THE TREE
+
+- "islands / disconnected people / orphans / is the tree all connected?": use analyze_tree_connectivity.
+- "what are the components / branches of the tree and which surnames/families make up each?", "break the tree down by connected component": use describe_tree_components (each component profiled with its dominant surnames). Components are ranked by size, rank 1 = the main (largest) one.
+- "who is in the main / largest component", "list everyone in component N", "which component / island is X in?": use get_tree_component (address it by rank, 1 = largest, OR by a person's Gramps ID). Page long components with offset + max_members.
+- "my deepest/highest/furthest ancestors, by lineage line": use get_deepest_ancestors (distinct from get_ancestors, which just lists generations). Omit the ID for the home person.
+- "the tree's lineages / root ancestors / brick walls / how deep does each line go": use analyze_lineages.
+- "data problems / broken records / why is someone's chart empty": use check_tree_integrity.
+- "key / central / bridge people in the tree": use find_key_people (metric = betweenness | closeness | degree | articulation).
 
 
 FORMATTING
@@ -270,4 +315,19 @@ def create_agent(
     agent.tool(filter_people)
     agent.tool(filter_events)
     agent.tool(filter_families)
+    agent.tool(get_home_person)
+    agent.tool(get_relatives)
+    agent.tool(get_relationship)
+    agent.tool(get_anniversaries)
+    agent.tool(get_tree_statistics)
+    agent.tool(get_timeline)
+    agent.tool(get_ancestors)
+    agent.tool(get_descendants)
+    agent.tool(analyze_tree_connectivity)
+    agent.tool(describe_tree_components)
+    agent.tool(get_tree_component)
+    agent.tool(get_deepest_ancestors)
+    agent.tool(analyze_lineages)
+    agent.tool(check_tree_integrity)
+    agent.tool(find_key_people)
     return agent

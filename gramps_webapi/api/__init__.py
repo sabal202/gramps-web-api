@@ -55,7 +55,7 @@ from .resources.analysis import (
     IntegrityResource,
     LineagesResource,
 )
-from .resources.chat import ChatResource
+from .resources.chat import ChatResource, ChatStreamResource
 from .resources.citations import CitationResource, CitationsResource
 from .resources.config import ConfigResource, ConfigsResource
 from .resources.dna import DnaMatchParserResource, PersonDnaMatchesResource
@@ -965,7 +965,7 @@ register_endpt(
 
 # Chat
 register_endpt(ChatResource, "/chat/", "chat", tags=["Chat"])
-# ChatStreamResource (/chat/stream SSE) is re-added by the chat-tools port task.
+register_endpt(ChatStreamResource, "/chat/stream", "chat_stream", tags=["Chat"])
 
 # Config
 register_endpt(ConfigsResource, "/config/", "configs", tags=["Config"])
