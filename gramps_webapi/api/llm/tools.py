@@ -59,7 +59,7 @@ from ..resources.util import (
     get_person_profile_for_object,
 )
 from ..search import get_search_indexer
-from ..util import get_db_outside_request, get_logger
+from ..util import get_db_outside_request, get_locale_for_language, get_logger
 from .deps import AgentDeps
 from .render import render_handle, render_object
 
