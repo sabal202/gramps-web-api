@@ -28,7 +28,6 @@ from gramps.gen.db.base import DbReadBase
 from gramps.gen.display.place import PlaceDisplay
 from gramps.gen.errors import HandleError
 from gramps.gen.lib import Date, Event, EventType, Person, Span
-from gramps.gen.relationship import get_relationship_calculator
 from gramps.gen.utils import alive
 from gramps.gen.utils.db import (
     get_birth_or_fallback,
@@ -42,7 +41,7 @@ from webargs import fields, validate
 
 from ...types import Handle
 from ..blueprint import api_blueprint
-from ..util import get_db_handle, get_locale_for_language
+from ..util import abort_with_message, get_db_handle, get_locale_for_language
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
 from .filters import apply_filter
@@ -52,6 +51,7 @@ from .util import (
     display_date,
     get_fallback_event,
     get_object_or_none,
+    get_one_relationship,
     get_person_profile_for_object,
     get_place_profile_for_object,
     get_rating,
@@ -60,6 +60,13 @@ from .util import (
 pd = PlaceDisplay()
 default_locale = GrampsLocale(lang="en")
 event_type = EventType()
+
+# An anchored people-timeline computes a relationship (get_one_relationship, a
+# per-person graph walk) for EVERY person in the set. Without an explicit
+# handles/filter the set defaults to the whole tree, so an anchored request
+# would fan out over every person — minutes of work (or a hang) on a large
+# tree. Cap it and fail fast with guidance instead.
+MAX_ANCHORED_TIMELINE_PEOPLE = 500
 
 DEATH_INDICATORS = [
     event_type.DEATH,
@@ -364,21 +371,16 @@ class Timeline:
         if person is None:
             # the private proxy returns None for private people
             raise HandleError(f"Handle {handle} not found")
-        # English string for filtering and recursion, localized one for display
+        # English string for filtering and recursion, localized one for
+        # display; both in-law (affinal) aware via util.get_one_relationship.
         relationship_en = ""
         if self.relative_filters or ancestors > 1:
-            calculator = get_relationship_calculator(
-                reinit=True, clocale=default_locale
-            )
-            calculator.set_depth(self.depth)
-            relationship_en = calculator.get_one_relationship(
-                self.db_handle, self.anchor_person, person, olocale=default_locale
-            )
-        calculator = get_relationship_calculator(reinit=True, clocale=self.locale)
-        calculator.set_depth(self.depth)
-        relationship = calculator.get_one_relationship(
-            self.db_handle, self.anchor_person, person, olocale=self.locale
-        )
+            relationship_en = get_one_relationship(
+                self.db_handle, self.anchor_person, person, self.depth, default_locale
+            )[0]
+        relationship = get_one_relationship(
+            self.db_handle, self.anchor_person, person, self.depth, self.locale
+        )[0]
         if self.relative_filters:
             found = False
             for relative in self.relative_filters:
@@ -1045,6 +1047,14 @@ class TimelinePeopleResource(ProtectedResource, GrampsJSONEncoder):
                 handles = apply_filter(db_handle, args, "Person", handles)
 
             if "anchor" in args:
+                if len(handles) > MAX_ANCHORED_TIMELINE_PEOPLE:
+                    abort_with_message(
+                        422,
+                        "An anchored people-timeline computes a relationship "
+                        "per person and is limited to "
+                        f"{MAX_ANCHORED_TIMELINE_PEOPLE} people; narrow the set "
+                        "with handles, filter or rules.",
+                    )
                 for handle in handles:
                     timeline.add_relative(handle)
             else:

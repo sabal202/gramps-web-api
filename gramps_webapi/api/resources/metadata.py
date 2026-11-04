@@ -46,6 +46,7 @@ from ...dbmanager import WebDbManager
 from ..auth import has_permissions, require_permissions
 from ..backup_store import backups_enabled
 from ..blueprint import api_blueprint
+from ..cache import get_db_last_change_timestamp
 from ..deprecations import check_deprecations
 from ..search import get_search_indexer
 from ..tasks import queue_search_index_build
@@ -57,6 +58,7 @@ from ..util import (
 )
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
+from .ru_surnames import count_unique_family_surnames
 from .schemas import MetadataSchema, MetadataServerSchema, ResearcherSchema
 
 
@@ -300,6 +302,21 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
             "count": search_count,
         }
 
+        # Memoize the distinct-surname count (a full people scan, ~200ms on a
+        # large tree) across dashboard loads: it depends only on people's names,
+        # so key it on tree id + db last-change timestamp + privacy view. A
+        # missing timestamp disables the memo (recompute), so staleness is
+        # impossible.
+        surname_ts = get_db_last_change_timestamp(tree_id)
+        surname_cache_key = (
+            (tree_id, surname_ts, has_permissions({PERM_VIEW_PRIVATE}))
+            if surname_ts is not None
+            else None
+        )
+        unique_surnames = count_unique_family_surnames(
+            db_handle, cache_key=surname_cache_key
+        )
+
         result = {
             **_get_server_metadata(),
             "database": {
@@ -319,6 +336,10 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
                 "repositories": db_handle.get_number_of_repositories(),
                 "notes": db_handle.get_number_of_notes(),
                 "tags": db_handle.get_number_of_tags(),
+                # Downstream: distinct family surnames, excluding patronymics
+                # and collapsing masculine/feminine gender forms
+                # (Соболевский/Соболевская) into one.
+                "unique_surnames": unique_surnames,
             },
             "researcher": db_handle.get_researcher(),
             "search": {

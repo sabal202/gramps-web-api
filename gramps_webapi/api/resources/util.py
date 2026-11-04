@@ -60,6 +60,7 @@ from gramps.gen.lib import (
     Source,
     Span,
 )
+from gramps.gen.lib.date import Today
 
 # from gramps.gen.lib.serialize import to_json
 from gramps.gen.lib.json_utils import object_to_dict, object_to_string, remove_object
@@ -67,6 +68,7 @@ from gramps.gen.lib.primaryobj import BasicPrimaryObject as GrampsObject
 from gramps.gen.plug import BasePluginManager
 from gramps.gen.relationship import get_relationship_calculator
 from gramps.gen.soundex import soundex
+from gramps.gen.utils.alive import probably_alive
 from gramps.gen.utils.db import (
     get_birth_or_fallback,
     get_death_or_fallback,
@@ -91,6 +93,9 @@ from ..util import (
     get_tree_from_jwt,
 )
 from .db_backend import SINGLE_TREE_DBAPI_CLASS_NAMES
+from .inlaw import inlaw_relationship as _inlaw_relationship
+from .marital_status import get_marital_status
+from .ru_surnames import get_family_surname, get_patronymic
 
 pd = PlaceDisplay()
 _ = glocale.translation.gettext
@@ -187,6 +192,19 @@ def get_source_by_handle(
     if "extend" in args:
         obj.extended = get_extended_attributes(db_handle, obj, args)
     return obj
+
+
+def _get_object_by_handle(
+    db_handle: DbReadBase, class_name: str, handle: Handle
+) -> Optional[GrampsObject]:
+    """Look up an object of a given Gramps class by handle, or None if missing."""
+    getter = getattr(db_handle, f"get_{class_name.lower()}_from_handle", None)
+    if getter is None:
+        return None
+    try:
+        return getter(handle)
+    except HandleError:
+        return None
 
 
 def get_sex_profile(person: Person) -> str:
@@ -871,7 +889,8 @@ def get_person_profile_for_object(
         "birth": birth,
         "death": death,
         "name_given": name_displayer.display_given(person),
-        "name_surname": person.primary_name.get_surname(),
+        "name_surname": get_family_surname(person.primary_name),
+        "name_patronymic": get_patronymic(person.primary_name),
         "name_display": (
             name_displayer.format_str(person.get_primary_name(), name_format)
             if name_format
@@ -883,6 +902,19 @@ def get_person_profile_for_object(
             for address in person.address_list
         ],
     }
+    if "current_age" in args:
+        # Deceased -> always compute "would be N today" (we know they're not
+        # alive, so no need for the probably_alive() heuristic). Living/no
+        # death event -> only compute if probably_alive() agrees, so an
+        # implausibly old undated ancestor doesn't get a bogus "current age".
+        if birth_event is not None and (
+            death_event is not None or probably_alive(person, db_handle)
+        ):
+            profile["current_age"] = (
+                Span(birth_event.date, Today())
+                .format(precision=precision, dlocale=locale)
+                .strip("()")
+            )
     if "all" in args or "span" in args:
         options.append("span")
     if "all" in args or "events" in args:
@@ -1030,6 +1062,9 @@ def get_family_profile_for_object(
             for child_ref in family.child_ref_list
         ],
     }
+    profile["marital_status"] = get_marital_status(
+        db_handle, family, profile["father"], profile["mother"]
+    )
     if profile["father"]:
         if profile["father"]["name_surname"] or profile["father"]["name_given"]:
             profile["family_surname"] = profile["father"]["name_surname"]
@@ -2018,7 +2053,7 @@ def filter_missing_files(objects: list[Media]) -> list[Media]:
     return [obj for obj in objects if obj.handle not in handles_existing]
 
 
-def get_one_relationship(
+def _get_one_relationship_blood(
     db_handle: DbReadBase,
     person1: Person,
     person2: Person,
@@ -2334,3 +2369,31 @@ def return_304_if_unchanged(response: Response, etag: str) -> Response:
         response.status = "304"
         response.response = ""
     return response
+
+
+def get_one_relationship(
+    db_handle: DbReadBase,
+    person1: Person,
+    person2: Person,
+    depth: int,
+    locale: GrampsLocale = glocale,
+    include_inlaw: bool = True,
+) -> tuple[str, int, int]:
+    """Blood/spouse relationship, falling back to a 1-step in-law (affinal) tie.
+
+    Gramps' relationship calculator only resolves consanguineous and spousal
+    ties. When it finds nothing and ``include_inlaw`` is set, fall back to a
+    single-step affinal relationship (e.g. a sibling's spouse), which covers the
+    common in-law cases without a full affinal graph search.
+
+    For an in-law result, the two returned distances are the blood distances to
+    the marriage bridge, not common-ancestor distances, and may be ``-1`` when
+    there is no common ancestor at all.
+    """
+    result = _get_one_relationship_blood(db_handle, person1, person2, depth, locale)
+    if result[0] or not include_inlaw:
+        return result
+    inlaw = _inlaw_relationship(db_handle, person1, person2, depth, locale)
+    if inlaw is not None:
+        return inlaw
+    return result

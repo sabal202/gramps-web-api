@@ -48,6 +48,13 @@ from .resources.bookmarks import (
     BookmarkResource,
     BookmarksResource,
 )
+from .resources.analysis import (
+    CentralityResource,
+    ConnectivityResource,
+    GraphResource,
+    IntegrityResource,
+    LineagesResource,
+)
 from .resources.chat import ChatResource
 from .resources.citations import CitationResource, CitationsResource
 from .resources.config import ConfigResource, ConfigsResource
@@ -112,6 +119,16 @@ from .resources.object_query import (
     SourceQueryResource,
     TagQueryResource,
 )
+from .resources.immich_import.resources import (
+    ImmichAlbumCommitResource,
+    ImmichAlbumPreviewResource,
+    ImmichAlbumsResource,
+    ImmichAssetThumbnailResource,
+    ImmichExistingCommitResource,
+    ImmichExistingPreviewResource,
+    ImmichMappingResource,
+    ImmichPeopleResource,
+)
 from .resources.objects import (
     CreateObjectsResource,
     DeleteObjectsByHandleResource,
@@ -135,6 +152,7 @@ from .resources.places import (
 )
 from .resources.push_subscriptions import UserPushSubscriptionsResource
 from .resources.relations import RelationResource, RelationsResource
+from .resources.relatives import CommonAncestorsResource, RelativesResource
 from .resources.reports import (
     ReportFileResource,
     ReportFileResultResource,
@@ -178,6 +196,8 @@ from .resources.types import (
     DefaultTypesResource,
     TypesResource,
 )
+from .resources.access_tokens import UserAccessTokenResource
+from .resources.anniversaries import AnniversariesIcsResource
 from .resources.user import (
     UserChangePasswordResource,
     UserConfirmEmailResource,
@@ -742,6 +762,13 @@ register_endpt(
     "relations",
     tags=["Relations"],
 )
+register_endpt(RelativesResource, "/relatives/", "relatives", tags=["Relations"])
+register_endpt(
+    CommonAncestorsResource,
+    "/people/<string:handle>/common-ancestors",
+    "common_ancestors",
+    tags=["Relations"],
+)
 # Living
 register_endpt(
     LivingDatesResource,
@@ -851,7 +878,12 @@ register_endpt(
 )
 # User
 register_endpt(UsersResource, "/users/", "users", tags=["Users"])
-register_endpt(UserResource, "/users/<string:user_name>/", "user", tags=["Users"])
+register_endpt(
+    AnniversariesIcsResource,
+    "/anniversaries.ics",
+    "anniversaries_ics",
+    tags=["Anniversaries"],
+)
 register_endpt(
     UserPushSubscriptionsResource,
     "/users/-/push-subscriptions/",
@@ -864,6 +896,7 @@ register_endpt(
     "user_access_token",
     tags=["Users"],
 )
+register_endpt(UserResource, "/users/<string:user_name>/", "user", tags=["Users"])
 register_endpt(
     UserAccessTokenListResource,
     "/users/-/access-tokens/<string:scope>/tokens/",
@@ -932,6 +965,7 @@ register_endpt(
 
 # Chat
 register_endpt(ChatResource, "/chat/", "chat", tags=["Chat"])
+# ChatStreamResource (/chat/stream SSE) is re-added by the chat-tools port task.
 
 # Config
 register_endpt(ConfigsResource, "/config/", "configs", tags=["Config"])
@@ -975,6 +1009,77 @@ register_endpt(
     "/media/archive/upload/zip",
     "media_archive_upload_zip",
     tags=["Media"],
+)
+
+# Analysis (whole-tree structural analysis: connectivity, lineages, integrity,
+# centrality — see gramps_webapi/api/resources/analysis.py)
+register_endpt(
+    ConnectivityResource,
+    "/analysis/connectivity/",
+    "analysis_connectivity",
+    tags=["Analysis"],
+)
+register_endpt(
+    LineagesResource, "/analysis/lineages/", "analysis_lineages", tags=["Analysis"]
+)
+register_endpt(
+    IntegrityResource, "/analysis/integrity/", "analysis_integrity", tags=["Analysis"]
+)
+register_endpt(
+    CentralityResource,
+    "/analysis/centrality/",
+    "analysis_centrality",
+    tags=["Analysis"],
+)
+register_endpt(
+    GraphResource,
+    "/analysis/graph/",
+    "analysis_graph",
+    tags=["Analysis"],
+)
+
+# Immich import (downstream cluster: import photos/faces from Immich - see
+# gramps_webapi/api/resources/immich_import/ and
+# docs/superpowers/specs/2026-07-09-immich-gramps-import-design.md in the
+# gramps-dev workspace)
+register_endpt(
+    ImmichAlbumsResource, "/immich/albums/", "immich_albums", tags=["Immich"]
+)
+register_endpt(
+    ImmichAlbumPreviewResource,
+    "/immich/albums/<string:album_id>/preview",
+    "immich_album_preview",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichAlbumCommitResource,
+    "/immich/albums/<string:album_id>/commit",
+    "immich_album_commit",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichExistingPreviewResource,
+    "/immich/existing/preview",
+    "immich_existing_preview",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichExistingCommitResource,
+    "/immich/existing/commit",
+    "immich_existing_commit",
+    tags=["Immich"],
+)
+register_endpt(
+    ImmichPeopleResource, "/immich/people/", "immich_people", tags=["Immich"]
+)
+register_endpt(
+    ImmichMappingResource, "/immich/mapping/", "immich_mapping", tags=["Immich"]
+)
+register_endpt(
+    ImmichAssetThumbnailResource,
+    "/immich/assets/<string:asset_id>/thumbnail",
+    "immich_asset_thumbnail",
+    tags=["Immich"],
 )
 
 

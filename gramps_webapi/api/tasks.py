@@ -1131,6 +1131,7 @@ def process_chat(
     history: list | None = None,
     verbose: bool = False,
     message_history_raw: str | None = None,
+    home_person_gramps_id: str | None = None,
 ) -> dict[str, Any]:
     """Process a chat query with the AI agent."""
     # import here to avoid error if AI dependencies are not installed
@@ -1161,6 +1162,7 @@ def process_chat(
         history=history,
         progress_callback=progress_callback,
         message_history_raw=message_history_raw,
+        home_person_gramps_id=home_person_gramps_id,
     )
 
     response_text = clean_answer(

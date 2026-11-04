@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from marshmallow import INCLUDE, Schema, ValidationError, fields, validate
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -421,6 +422,14 @@ class PersonProfileSchema(_Base):
         EventProfileSchema,
         metadata={"description": "Birth event profile (or best available fallback)."},
     )
+    current_age = fields.Str(
+        metadata={
+            "description": "Current age if the person is presumed alive, or the "
+            "age they would be today if deceased. Absent if the birth date is "
+            "unknown, or if there's no death date and the person is implausibly "
+            "old to still be alive."
+        },
+    )
     death = fields.Nested(
         EventProfileSchema,
         metadata={"description": "Death event profile (or best available fallback)."},
@@ -444,6 +453,9 @@ class PersonProfileSchema(_Base):
     )
     name_given = fields.Str(
         metadata={"description": "Given (first) name."},
+    )
+    name_patronymic = fields.Str(
+        metadata={"description": "Patronymic (отчество), if any."},
     )
     name_surname = fields.Str(
         metadata={"description": "Surname."},
@@ -496,6 +508,15 @@ class FamilyProfileSchema(_Base):
     )
     handle = fields.Str(
         metadata={"description": "Unique handle for the family."},
+    )
+    marital_status = fields.Str(
+        metadata={
+            "description": (
+                "Derived union status of the family: one of 'married', "
+                "'divorced', 'widowed', 'partners' or 'unknown'. A "
+                "locale-neutral enum, not translated."
+            )
+        },
     )
     marriage = fields.Nested(
         EventProfileSchema,
@@ -2080,6 +2101,16 @@ class UndoTransactionSchema(_Base):
         fields.Raw(),
         metadata={"description": "List of individual object changes."},
     )
+    matched_handles = fields.List(
+        fields.Str(),
+        metadata={
+            "description": (
+                "Handles from the requested object/page handle set that this "
+                "transaction touched. Only populated by the per-object "
+                "change history endpoint (GET /api/<namespace>/<handle>/history/)."
+            )
+        },
+    )
 
 
 class ObjectChangeSchema(_Base):
@@ -2351,6 +2382,12 @@ class ObjectCountsSchema(_Base):
     repositories = fields.Float(metadata={"description": "Number of repositories."})
     sources = fields.Float(metadata={"description": "Number of sources."})
     tags = fields.Float(metadata={"description": "Number of tags."})
+    unique_surnames = fields.Float(
+        metadata={
+            "description": "Number of distinct surnames, collapsing "
+            "masculine/feminine gender forms into one."
+        }
+    )
 
 
 class ImportResultSchema(ObjectCountsSchema):
@@ -3505,3 +3542,1101 @@ class VerifyResultSchema(_Base):
     severity = fields.Str(
         metadata={"description": "Severity level: 'error' or 'warning'."},
     )
+
+
+# ===========================================================================
+# Kinship — /relatives/ and /people/<handle>/common-ancestors
+# ===========================================================================
+
+
+class RelativesQueryArgs(Schema):
+    """Query arguments for the /relatives/ endpoint."""
+
+    handle = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of the anchor person. "
+            "Defaults to the tree's home person when omitted."
+        },
+    )
+    locale = fields.Str(
+        load_default=None,
+        validate=validate.Length(min=1, max=5),
+        metadata={
+            "description": "Language code of the locale to use for relationship labels. "
+            "Must be a valid code from the available translations."
+        },
+    )
+
+
+class CommonAncestorsQueryArgs(Schema):
+    """Query arguments for the /people/<handle>/common-ancestors endpoint."""
+
+    to = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of the second person. "
+            "Defaults to the tree's home person when omitted."
+        },
+    )
+    locale = fields.Str(
+        load_default=None,
+        validate=validate.Length(min=1, max=5),
+        metadata={
+            "description": "Language code of the locale to use for relationship labels. "
+            "Must be a valid code from the available translations."
+        },
+    )
+
+
+class MediaRefSimpleSchema(_Base):
+    """A lightweight media reference (handle + optional crop rectangle)."""
+
+    ref = fields.Str(
+        metadata={"description": "Handle of the referenced media object."},
+    )
+    rect = fields.List(
+        fields.Float(),
+        allow_none=True,
+        metadata={
+            "description": "Crop rectangle [left, top, right, bottom] as percentages, or null."
+        },
+    )
+
+
+class KinshipPersonSchema(_Base):
+    """Person profile as returned by the kinship endpoints.
+
+    Includes standard biographical profile fields plus ``media_list`` for
+    avatar support.  The ``relationship`` field is present on relative entries
+    but absent on anchor / path / ancestor entries.
+    """
+
+    handle = fields.Str(
+        metadata={"description": "Unique handle for the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Alternate user-managed identifier for the person."},
+    )
+    name_given = fields.Str(
+        metadata={"description": "Given (first) name."},
+    )
+    name_surname = fields.Str(
+        metadata={"description": "Surname."},
+    )
+    name_display = fields.Str(
+        metadata={"description": "Full display name."},
+    )
+    name_suffix = fields.Str(
+        metadata={"description": "Name suffix."},
+    )
+    sex = fields.Str(
+        metadata={"description": "Sex of the person ('M', 'F', 'X', or 'U')."},
+    )
+    birth = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Birth event profile (or best available fallback)."},
+    )
+    death = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Death event profile (or best available fallback)."},
+    )
+    media_list = fields.List(
+        fields.Nested(MediaRefSimpleSchema),
+        metadata={
+            "description": "Media references for this person (used for avatar display)."
+        },
+    )
+    relationship = fields.Str(
+        allow_none=True,
+        dump_default=None,
+        metadata={
+            "description": "Localized relationship label relative to the anchor person. "
+            "Present on relative entries (people in groups); absent on anchor, "
+            "path, and ancestor entries. ``name_display`` and ``name_suffix`` are "
+            "additive extras beyond the minimal contract keys."
+        },
+    )
+    kind = fields.Str(
+        allow_none=True,
+        dump_default=None,
+        metadata={
+            "description": "Kinship kind: 'blood' or 'inlaw'. "
+            "Present on relative entries (people in groups); absent on anchor, "
+            "path, and ancestor entries."
+        },
+    )
+
+
+class RelativesGroupSchema(_Base):
+    """A group of relatives sharing the same kinship category.
+
+    In-law relatives are folded into the matching blood-equivalent category
+    rather than collected in a separate trailing group.  Each person entry
+    carries a ``kind`` field (``'blood'`` or ``'inlaw'``); within the group
+    blood relatives appear first, then in-law relatives, both sorted by birth
+    date ascending.
+    """
+
+    category_key = fields.Str(
+        metadata={
+            "description": "Stable kinship category key (e.g. 'siblings', 'parents', "
+            "'cousins_1').  In-law relatives are merged into the equivalent blood "
+            "category rather than a separate 'inlaw' group."
+        },
+    )
+    count = fields.Int(
+        metadata={"description": "Total number of people in this group (blood + in-law)."},
+    )
+    people = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Person profiles in this group: blood relatives first "
+            "(birth date ascending), then in-law relatives (birth date ascending)."
+        },
+    )
+
+
+class RelativesSchema(_Base):
+    """Response schema for GET /api/relatives/."""
+
+    anchor = fields.Nested(
+        KinshipPersonSchema,
+        metadata={"description": "Profile of the anchor person (no relationship key)."},
+    )
+    groups = fields.List(
+        fields.Nested(RelativesGroupSchema),
+        metadata={
+            "description": "Relative groups sorted by closeness.  Blood and in-law "
+            "relatives are merged within each category group."
+        },
+    )
+
+
+class CommonAncestorEntrySchema(_Base):
+    """A single common-ancestor entry with intermediate path profiles."""
+
+    common_ancestors = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profile(s) of the common ancestor(s). "
+            "Normally one person; two for the full-sibling case (both parents)."
+        },
+    )
+    path_a = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profiles of intermediate persons on the path from the "
+            "subject person to the common ancestor (endpoints excluded)."
+        },
+    )
+    path_b = fields.List(
+        fields.Nested(KinshipPersonSchema),
+        metadata={
+            "description": "Profiles of intermediate persons on the path from the "
+            "other person to the common ancestor (endpoints excluded)."
+        },
+    )
+
+
+class CommonAncestorsSchema(_Base):
+    """Response schema for GET /api/people/<handle>/common-ancestors."""
+
+    relationship = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Localized relationship label between the subject and the other person. "
+            "Null when the two are unrelated or no other person is specified."
+        },
+    )
+    ancestors = fields.List(
+        fields.Nested(CommonAncestorEntrySchema),
+        metadata={
+            "description": "Closest common ancestor entries. "
+            "Empty when the two people are unrelated."
+        },
+    )
+    subject = fields.Nested(
+        KinshipPersonSchema,
+        metadata={
+            "description": "Person profile of the subject (the person identified by "
+            "the <handle> path parameter)."
+        },
+    )
+    home = fields.Nested(
+        KinshipPersonSchema,
+        allow_none=True,
+        metadata={
+            "description": "Person profile of the other endpoint: the ?to= person if "
+            "given, otherwise the tree home person. Null when no home person is set "
+            "and no ?to= was provided."
+        },
+    )
+
+
+# NOTE: this branch (feat/graph-analysis) predates feat/kinship, so the
+# KinshipPersonSchema / MediaRefSimpleSchema defined there (for /relatives/)
+# do not exist here yet. AnalysisPersonSchema below is a deliberately
+# separate, self-contained light-person schema (no media_list) so this
+# section merges into `integration` without colliding with those classes.
+
+from webargs.fields import DelimitedList  # noqa: E402
+
+
+class AnalysisPersonSchema(_Base):
+    """Lightweight person profile used by the /analysis/* endpoints."""
+
+    handle = fields.Str(
+        metadata={"description": "Unique handle for the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Alternate user-managed identifier for the person."},
+    )
+    name_given = fields.Str(
+        metadata={"description": "Given (first) name."},
+    )
+    name_surname = fields.Str(
+        metadata={"description": "Surname."},
+    )
+    name_display = fields.Str(
+        metadata={"description": "Full display name."},
+    )
+    sex = fields.Str(
+        metadata={"description": "Sex of the person ('M', 'F', 'X', or 'U')."},
+    )
+    birth = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Birth event profile (or best available fallback)."},
+    )
+    death = fields.Nested(
+        EventProfileSchema,
+        metadata={"description": "Death event profile (or best available fallback)."},
+    )
+
+
+class ConnectivityQueryArgs(Schema):
+    """Query arguments for the /analysis/connectivity/ endpoint."""
+
+    include_singletons = fields.Bool(
+        load_default=True,
+        metadata={
+            "description": "Whether to include single-person islands ('orphans') "
+            "in the response. When false, orphans are omitted (islands with 2+ "
+            "people are always included)."
+        },
+    )
+
+
+class ConnectivityIslandSchema(_Base):
+    """A connected component of the tree other than the main one."""
+
+    size = fields.Int(
+        metadata={"description": "Number of people in this island."},
+    )
+    people = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "Person profiles of everyone in this island."},
+    )
+
+
+class ConnectivityPairSchema(_Base):
+    """An isolated pair: two people connected only to each other."""
+
+    people = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "The two people forming the isolated pair."},
+    )
+
+
+class ConnectivitySchema(_Base):
+    """Response schema for GET /api/analysis/connectivity/."""
+
+    person_count = fields.Int(
+        metadata={"description": "Total number of people considered."},
+    )
+    component_count = fields.Int(
+        metadata={"description": "Number of connected components (main + islands)."},
+    )
+    main_component_size = fields.Int(
+        metadata={
+            "description": "Number of people in the largest connected component."
+        },
+    )
+    islands = fields.List(
+        fields.Nested(ConnectivityIslandSchema),
+        metadata={
+            "description": "Connected components other than the main one, largest "
+            "first. Includes isolated pairs and single-person orphans as well "
+            "(see those two fields for a filtered view of just those cases)."
+        },
+    )
+    isolated_pairs = fields.List(
+        fields.Nested(ConnectivityPairSchema),
+        metadata={"description": "Components consisting of exactly two people."},
+    )
+    orphans = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "People with no connections to anyone else in the tree. "
+            "Empty unless include_singletons=true."
+        },
+    )
+
+
+class LineagesQueryArgs(Schema):
+    """Query arguments for the /analysis/lineages/ endpoint.
+
+    With no ``person``, analyzes whole-tree lineages (brick-wall roots and
+    their descendant closures). With ``person`` given, switches to
+    deepest-ancestors mode: the ancestor lines of just that one person.
+    """
+
+    person = fields.Str(
+        load_default=None,
+        metadata={
+            "description": "Handle or Gramps ID of an anchor person. When given, "
+            "switches to deepest-ancestors mode: ancestor lines of just this "
+            "person, instead of whole-tree lineages."
+        },
+    )
+    birth_only = fields.Bool(
+        load_default=False,
+        metadata={
+            "description": "Only follow birth-relationship parent/child links "
+            "(exclude adoptive/step parent-child links) when computing depth."
+        },
+    )
+    group_by = fields.Str(
+        load_default="root",
+        validate=validate.OneOf(["root", "surname"]),
+        metadata={
+            "description": "Whole-tree mode only: group lineages by individual "
+            "root person ('root') or by the root's family surname ('surname')."
+        },
+    )
+    min_size = fields.Int(
+        load_default=1,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "Whole-tree mode only: omit lineages with fewer than "
+            "this many descendants."
+        },
+    )
+    generations = fields.Int(
+        load_default=0,
+        validate=validate.Range(min=0),
+        metadata={
+            "description": "Deepest-ancestors mode only: maximum number of "
+            "generations to walk up from the anchor. 0 = unlimited."
+        },
+    )
+    top = fields.Int(
+        load_default=10,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "Maximum number of lineages (whole-tree mode) or "
+            "ancestor-lines (deepest-ancestors mode) to return."
+        },
+    )
+
+
+class LineageEntrySchema(_Base):
+    """A single lineage in whole-tree mode: a brick-wall root and its line."""
+
+    root = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={
+            "description": "The lineage's root person. Absent when group_by="
+            "'surname' (see 'roots' instead)."
+        },
+    )
+    roots = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "Only present when group_by='surname': every root "
+            "person sharing this surname."
+        },
+    )
+    surname = fields.Str(
+        allow_none=True,
+        metadata={"description": "Only present when group_by='surname'."},
+    )
+    depth = fields.Int(
+        metadata={"description": "Longest chain of descendants below the root."},
+    )
+    size = fields.Int(
+        metadata={"description": "Number of people in the descendant closure."},
+    )
+
+
+class AncestorLineSchema(_Base):
+    """A single ancestor line in deepest-ancestors mode."""
+
+    root = fields.Nested(
+        AnalysisPersonSchema,
+        metadata={"description": "The deepest ancestor on this line."},
+    )
+    depth = fields.Int(
+        metadata={"description": "Generations above the anchor to this ancestor."},
+    )
+    ancestors = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={"description": "Every ancestor on this line, root to anchor."},
+    )
+
+
+class LineagesSchema(_Base):
+    """Response schema for GET /api/analysis/lineages/.
+
+    Whole-tree mode (no ``person``) populates ``max_tree_depth``,
+    ``root_count``, and ``lineages``. Deepest-ancestors mode (``person``
+    given) populates ``anchor``, ``max_depth``, ``by_line``, and
+    ``furthest`` instead.
+    """
+
+    # Whole-tree mode
+    max_tree_depth = fields.Int(
+        allow_none=True,
+        metadata={
+            "description": "Whole-tree mode: longest ancestry chain in the tree."
+        },
+    )
+    root_count = fields.Int(
+        allow_none=True,
+        metadata={"description": "Whole-tree mode: total number of brick-wall roots."},
+    )
+    lineages = fields.List(
+        fields.Nested(LineageEntrySchema),
+        metadata={"description": "Whole-tree mode: lineages, deepest/largest first."},
+    )
+    # Deepest-ancestors mode
+    anchor = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={"description": "Deepest-ancestors mode: the anchor person."},
+    )
+    max_depth = fields.Int(
+        allow_none=True,
+        metadata={
+            "description": "Deepest-ancestors mode: generations to the anchor's "
+            "most distant known ancestor(s)."
+        },
+    )
+    by_line = fields.List(
+        fields.Nested(AncestorLineSchema),
+        metadata={"description": "Deepest-ancestors mode: per-lineage breakdown."},
+    )
+    furthest = fields.List(
+        fields.Nested(AnalysisPersonSchema),
+        metadata={
+            "description": "Deepest-ancestors mode: the anchor's most distant "
+            "known ancestor(s) (there may be more than one at the max depth)."
+        },
+    )
+
+
+class IntegrityQueryArgs(Schema):
+    """Query arguments for the /analysis/integrity/ endpoint."""
+
+    checks = DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        validate=validate.ContainsOnly(
+            ["one_sided_refs", "dangling", "thin_records"]
+        ),
+        load_default=["one_sided_refs", "dangling"],
+        metadata={
+            "description": "Comma-delimited list of checks to run. Choices: "
+            "'one_sided_refs' (family/person cross-references that don't point "
+            "back at each other), 'dangling' (references to missing families or "
+            "events), 'thin_records' (people with no events at all — opt-in, "
+            "noisy). Default: 'one_sided_refs,dangling'."
+        },
+    )
+    max_examples = fields.Int(
+        load_default=0,
+        validate=validate.Range(min=0),
+        metadata={
+            "description": "Maximum number of example problems to return per "
+            "check. 0 = unlimited."
+        },
+    )
+
+
+class IntegrityProblemSchema(_Base):
+    """A single data-integrity finding."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the affected person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Gramps ID of the affected person."},
+    )
+    detail = fields.Str(
+        metadata={"description": "Human-readable description of the problem."},
+    )
+    person = fields.Nested(
+        AnalysisPersonSchema,
+        allow_none=True,
+        metadata={"description": "Profile of the affected person, if resolvable."},
+    )
+
+
+class IntegritySchema(_Base):
+    """Response schema for GET /api/analysis/integrity/."""
+
+    checks = fields.List(
+        fields.Str(),
+        metadata={"description": "Checks that were actually run (subset of ?checks=)."},
+    )
+    counts = fields.Dict(
+        keys=fields.Str(),
+        values=fields.Int(),
+        metadata={"description": "Number of problems found per check."},
+    )
+    problems = fields.Dict(
+        keys=fields.Str(),
+        values=fields.List(fields.Nested(IntegrityProblemSchema)),
+        metadata={
+            "description": "Problems found per check, truncated to ?max_examples= "
+            "if set."
+        },
+    )
+
+
+class CentralityQueryArgs(Schema):
+    """Query arguments for the /analysis/centrality/ endpoint."""
+
+    metric = fields.Str(
+        load_default="betweenness",
+        validate=validate.OneOf(
+            ["betweenness", "closeness", "degree", "articulation"]
+        ),
+        metadata={
+            "description": "Centrality metric. 'betweenness': how often someone "
+            "sits on the shortest path between others (bridge people). "
+            "'closeness': how close someone is to everyone else on average. "
+            "'degree': raw number of direct connections. 'articulation': cut "
+            "vertices whose removal would split the tree into disconnected "
+            "pieces."
+        },
+    )
+    max = fields.Int(
+        load_default=10,
+        validate=validate.Range(min=1),
+        metadata={"description": "Maximum number of ranked people to return."},
+    )
+    max_nodes = fields.Int(
+        load_default=5000,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "For 'betweenness'/'closeness' only: components larger "
+            "than this many people are skipped (these algorithms are expensive "
+            "on large graphs); the response's 'capped' flag notes when this "
+            "happened."
+        },
+    )
+
+
+class CentralityPersonSchema(_Base):
+    """A single ranked person in a centrality result."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the person."},
+    )
+    score = fields.Float(
+        metadata={"description": "Raw centrality score for the chosen metric."},
+    )
+    profile = fields.Nested(
+        AnalysisPersonSchema,
+        metadata={"description": "Person profile."},
+    )
+
+
+class CentralitySchema(_Base):
+    """Response schema for GET /api/analysis/centrality/."""
+
+    metric = fields.Str(
+        metadata={"description": "The centrality metric that was computed."},
+    )
+    capped = fields.Bool(
+        metadata={
+            "description": "True if one or more oversized components were "
+            "skipped due to ?max_nodes=."
+        },
+    )
+    people = fields.List(
+        fields.Nested(CentralityPersonSchema),
+        metadata={"description": "Ranked people, highest score first."},
+    )
+
+
+class GraphNodeSchema(_Base):
+    """One person node in the whole-tree graph export."""
+
+    handle = fields.Str(
+        metadata={"description": "Handle of the person."},
+    )
+    gramps_id = fields.Str(
+        metadata={"description": "Gramps ID of the person."},
+    )
+    given_name = fields.Str(
+        metadata={"description": "First/given name (primary name)."},
+    )
+    surname = fields.Str(
+        metadata={"description": "Surname (primary name, all surnames joined)."},
+    )
+    family_surname = fields.Str(
+        metadata={
+            "description": "Primary surname without patronymic-origin entries."
+        },
+    )
+    patronymic = fields.Str(
+        metadata={
+            "description": "Patronymic-origin surname entries of the primary "
+            "name, if any."
+        },
+    )
+    maiden_surname = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Birth surname of a woman whose primary name is a "
+            "married name (differs from the current surname), else null."
+        },
+    )
+    alt_names = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Distinct 'Given Surname' strings of alternate "
+            "names (birth names, AKA, spelling variants) for name matching."
+        },
+    )
+    gender = fields.Int(
+        metadata={
+            "description": "Gramps gender code: 0 female, 1 male, 2 unknown, "
+            "3 other."
+        },
+    )
+    birth_year = fields.Int(
+        allow_none=True,
+        metadata={"description": "Year of the birth event, if known."},
+    )
+    death_year = fields.Int(
+        allow_none=True,
+        metadata={"description": "Year of the death event, if known."},
+    )
+    tags = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Indices into the response's top-level 'tags' list."
+        },
+    )
+    citations = fields.Int(
+        metadata={
+            "description": "Number of citations on the person and their "
+            "events (a rough sourcing-quality measure)."
+        },
+    )
+
+
+class GraphLinkSchema(_Base):
+    """One edge in the whole-tree graph export."""
+
+    source = fields.Int(
+        metadata={"description": "Index of the source node in 'people'."},
+    )
+    target = fields.Int(
+        metadata={"description": "Index of the target node in 'people'."},
+    )
+    type = fields.Str(
+        metadata={"description": "Edge type: 'spouse' or 'child'."},
+    )
+
+
+class GraphSchema(_Base):
+    """Response schema for GET /api/analysis/graph/."""
+
+    people = fields.List(
+        fields.Nested(GraphNodeSchema),
+        metadata={"description": "All (visible) people as graph nodes."},
+    )
+    links = fields.List(
+        fields.Nested(GraphLinkSchema),
+        metadata={
+            "description": "Edges between nodes: spouse↔spouse and "
+            "parent↔child, deduplicated, as indices into 'people'."
+        },
+    )
+    tags = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Tag names referenced by the nodes' 'tags' indices."
+        },
+    )
+
+
+# ===========================================================================
+# Immich import (downstream cluster - see
+# docs/superpowers/specs/2026-07-09-immich-gramps-import-design.md)
+# ===========================================================================
+#
+# Field names are camelCase to match the frozen endpoint contract exactly
+# (these are consumed directly by the grampsjs frontend, not by other Gramps
+# tooling, so there is no snake_case Gramps-JSON precedent to follow here).
+# ``bbox``/``proposedRect`` are both Gramps-rect-style
+# ``[left, top, right, bottom]`` **percent ints** (0-100) - ``bbox`` is the
+# tight face box straight from Immich, ``proposedRect`` is the "head +
+# shoulders" expansion from ``regions.portrait_region_from_face``. Both are
+# converted from Immich's native pixel coordinates server-side so the
+# frontend never has to know the source image's pixel dimensions.
+
+
+class ImmichAlbumSchema(_Base):
+    """One archive-account Immich album, as listed by GET /api/immich/albums/."""
+
+    id = fields.Str(
+        metadata={"description": "Immich album id (UUID)."},
+    )
+    name = fields.Str(
+        metadata={"description": "Album display name."},
+    )
+    assetCount = fields.Int(
+        metadata={"description": "Number of assets in the album."},
+    )
+    mappedTargetGrampsId = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps ID of the tree object this album has previously "
+            "been mapped to (via its ImmichAlbumId attribute), or null if this "
+            "album has never been imported before."
+        },
+    )
+
+
+class ImmichPersonMatchSchema(_Base):
+    """A face detected on one asset, with its Gramps-side resolution."""
+
+    immichPersonId = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Immich person id this face was clustered to, or null "
+            "for an unrecognized/unassigned face."
+        },
+    )
+    name = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person display name, or null if unnamed."},
+    )
+    bbox = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Tight face bounding box [left, top, right, bottom] as "
+            "percent (0-100) of the image, as returned by Immich before any "
+            "head+shoulders expansion."
+        },
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person (via "
+            "the ImmichPersonId attribute), or null if unmapped - unmapped people "
+            "never block import, they just surface as 'needs linking'."
+        },
+    )
+    proposedRect = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Proposed 'head + shoulders' region "
+            "[left, top, right, bottom] as percent (0-100), editable by the "
+            "curator before commit."
+        },
+    )
+
+
+class ImmichAlbumPreviewItemSchema(_Base):
+    """One photo in a Flow-B album preview."""
+
+    immichAssetId = fields.Str(
+        metadata={"description": "Immich asset id (UUID)."},
+    )
+    thumbnailUrl = fields.Str(
+        metadata={"description": "URL the frontend can load a preview thumbnail from."},
+    )
+    alreadyImported = fields.Bool(
+        metadata={
+            "description": "True if this asset was already imported in a previous "
+            "commit (matched by ImmichAssetId attribute) - shown so the curator "
+            "doesn't re-attach it by accident, though re-committing it is a no-op."
+        },
+    )
+    people = fields.List(
+        fields.Nested(ImmichPersonMatchSchema),
+        metadata={"description": "Faces detected on this asset by Immich."},
+    )
+
+
+class ImmichAlbumPreviewSchema(_Base):
+    """Response schema for GET /api/immich/albums/<album_id>/preview."""
+
+    target = fields.Str(
+        metadata={"description": "Gramps ID of the object this album will attach to."},
+    )
+    items = fields.List(
+        fields.Nested(ImmichAlbumPreviewItemSchema),
+        metadata={"description": "Photos in the album with proposed regions."},
+    )
+
+
+class ImmichAlbumPreviewQueryArgs(Schema):
+    """Query arguments for GET /api/immich/albums/<album_id>/preview."""
+
+    target = fields.Str(
+        required=True,
+        metadata={
+            "description": "Gramps ID of the object (event/family/person/...) to "
+            "attach this album's photos to."
+        },
+    )
+
+
+class ImmichRegionCommitSchema(Schema):
+    """A single person-region to write on commit (request body only)."""
+
+    grampsHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps person handle this region tags."},
+    )
+    rect = fields.List(
+        fields.Int(),
+        required=True,
+        validate=validate.Length(equal=4),
+        metadata={
+            "description": "Region [left, top, right, bottom] as percent (0-100), "
+            "as edited/confirmed by the curator in the review step."
+        },
+    )
+
+
+class ImmichAlbumCommitItemSchema(Schema):
+    """One photo's commit instructions (request body only)."""
+
+    immichAssetId = fields.Str(
+        required=True,
+        metadata={"description": "Immich asset id (UUID) to import."},
+    )
+    attach = fields.Bool(
+        load_default=True,
+        metadata={
+            "description": "Whether to download and attach this photo as Media. "
+            "False imports zero photos for this item but still writes any listed "
+            "regions if the asset was already imported in a previous commit "
+            "(matched by ImmichAssetId)."
+        },
+    )
+    regions = fields.List(
+        fields.Nested(ImmichRegionCommitSchema),
+        load_default=list,
+        metadata={
+            "description": "Person regions to write for this photo. Empty list "
+            "imports the photo as plain media with no face tags - face attachment "
+            "is fully optional (design doc 'Optionality')."
+        },
+    )
+
+
+class ImmichAlbumCommitArgs(Schema):
+    """Request body for POST /api/immich/albums/<album_id>/commit."""
+
+    target = fields.Str(
+        required=True,
+        metadata={
+            "description": "Gramps ID of the object to attach photos to. Persisted "
+            "as this album's remembered target (ImmichAlbumId attribute) on first "
+            "commit."
+        },
+    )
+    items = fields.List(
+        fields.Nested(ImmichAlbumCommitItemSchema),
+        required=True,
+        metadata={"description": "Photos to import/update, as reviewed by the curator."},
+    )
+
+
+class ImmichSkippedItemSchema(_Base):
+    """One asset that could not be imported."""
+
+    immichAssetId = fields.Str(
+        metadata={"description": "Immich asset id (UUID) that was skipped."},
+    )
+    reason = fields.Str(
+        metadata={
+            "description": "Why the asset was skipped, e.g. a corrupt/short-read "
+            "download detected before the DbTxn opened."
+        },
+    )
+
+
+class ImmichAlbumCommitResultSchema(_Base):
+    """Response schema for POST /api/immich/albums/<album_id>/commit."""
+
+    createdMedia = fields.List(
+        fields.Str(),
+        metadata={"description": "Handles of newly created Media objects."},
+    )
+    updatedMedia = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Handles of existing Media objects that were reused "
+            "(checksum dedup) or had new regions/attributes added."
+        },
+    )
+    skipped = fields.List(
+        fields.Nested(ImmichSkippedItemSchema),
+        metadata={"description": "Assets that could not be imported, with a reason."},
+    )
+
+
+class ImmichExistingPreviewPersonSchema(_Base):
+    """A face suggestion for one already-in-tree media object (Flow A)."""
+
+    immichPersonId = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person id, or null if unrecognized."},
+    )
+    name = fields.Str(
+        allow_none=True,
+        metadata={"description": "Immich person display name, or null if unnamed."},
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person, or "
+            "null if unmapped."
+        },
+    )
+    proposedRect = fields.List(
+        fields.Int(),
+        metadata={
+            "description": "Proposed 'head + shoulders' region "
+            "[left, top, right, bottom] as percent (0-100)."
+        },
+    )
+    alreadyHasRegion = fields.Bool(
+        metadata={
+            "description": "True if this person already has a cropped region on "
+            "this media (region proposal is suppressed/informational only in "
+            "that case - Flow A only proposes regions where one is absent)."
+        },
+    )
+
+
+class ImmichExistingPreviewItemSchema(_Base):
+    """One already-in-tree media object with face suggestions (Flow A)."""
+
+    mediaHandle = fields.Str(
+        metadata={"description": "Gramps handle of the existing Media object."},
+    )
+    immichAssetId = fields.Str(
+        metadata={
+            "description": "Immich asset id this media was matched to (by basename "
+            "or checksum against the external library)."
+        },
+    )
+    people = fields.List(
+        fields.Nested(ImmichExistingPreviewPersonSchema),
+        metadata={"description": "Face suggestions for this media."},
+    )
+
+
+class ImmichExistingPreviewSchema(_Base):
+    """Response schema for GET /api/immich/existing/preview."""
+
+    items = fields.List(
+        fields.Nested(ImmichExistingPreviewItemSchema),
+        metadata={
+            "description": "Already-in-tree media objects with pending face "
+            "suggestions, matched against the Immich external library."
+        },
+    )
+
+
+class ImmichExistingRegionCommitItemSchema(Schema):
+    """One media object's region commit instructions (request body only)."""
+
+    mediaHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps handle of the existing Media object."},
+    )
+    regions = fields.List(
+        fields.Nested(ImmichRegionCommitSchema),
+        required=True,
+        metadata={"description": "Person regions to add to this media."},
+    )
+
+
+class ImmichExistingCommitArgs(Schema):
+    """Request body for POST /api/immich/existing/commit."""
+
+    items = fields.List(
+        fields.Nested(ImmichExistingRegionCommitItemSchema),
+        required=True,
+        metadata={"description": "Media objects to add regions to."},
+    )
+
+
+class ImmichExistingCommitResultSchema(_Base):
+    """Response schema for POST /api/immich/existing/commit."""
+
+    updatedMedia = fields.List(
+        fields.Str(),
+        metadata={
+            "description": "Handles of Media objects that had regions added. "
+            "Files are never touched (zero-copy) - only MediaRef regions on the "
+            "tagged persons change."
+        },
+    )
+
+
+class ImmichPersonSchema(_Base):
+    """Response schema for GET /api/immich/people/."""
+
+    immichPersonId = fields.Str(
+        metadata={"description": "Immich person id (UUID)."},
+    )
+    name = fields.Str(
+        metadata={"description": "Immich person display name."},
+    )
+    grampsHandle = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Gramps person handle mapped to this Immich person (via "
+            "ImmichPersonId attribute), or null if unmapped."
+        },
+    )
+
+
+class ImmichPeopleQueryArgs(Schema):
+    """Query arguments for GET /api/immich/people/."""
+
+    query = fields.Str(
+        load_default="",
+        metadata={
+            "description": "Case-insensitive substring filter on the Immich person "
+            "name. Empty string (default) returns all people."
+        },
+    )
+
+
+class ImmichMappingArgs(Schema):
+    """Request body for POST /api/immich/mapping/."""
+
+    immichPersonId = fields.Str(
+        required=True,
+        metadata={"description": "Immich person id to map."},
+    )
+    grampsHandle = fields.Str(
+        required=True,
+        metadata={"description": "Gramps person handle to map it to."},
+    )
+
+

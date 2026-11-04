@@ -557,6 +557,7 @@ class TestFamilies(unittest.TestCase):
                     ]
                 },
                 "relationship": "Married",
+                "marital_status": "widowed",
             },
         )
 
@@ -982,6 +983,7 @@ class TestFamiliesHandle(unittest.TestCase):
                     ]
                 },
                 "relationship": "Married",
+                "marital_status": "married",
             },
         )
 

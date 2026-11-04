@@ -41,6 +41,7 @@ from .db_backend import (
     sql_count,
     sql_sorted_handles,
 )
+from .ru_surnames import get_family_surname
 from .util import get_fallback_event, get_object_or_none
 
 
@@ -83,7 +84,7 @@ class Sort:
     def by_person_surname_key(self, obj: GrampsObject):
         """Compare by surname, if equal uses given name and suffix."""
         name = obj.get_primary_name()
-        fsn = name.get_surname()
+        fsn = get_family_surname(name)
         ffn = name.get_first_name()
         fsu = name.get_suffix()
         return self.locale.sort_key(fsn + ffn + fsu)
@@ -126,7 +127,7 @@ class Sort:
         if person is None:
             return self.locale.sort_key("")
         name = person.get_primary_name()
-        fsn = name.get_surname()
+        fsn = get_family_surname(name)
         ffn = name.get_first_name()
         fsu = name.get_suffix()
         return self.locale.sort_key(fsn + ffn + fsu)
