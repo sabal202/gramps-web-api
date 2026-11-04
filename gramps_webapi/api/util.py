@@ -335,7 +335,11 @@ def close_db(db_handle: DbReadBase) -> None:
             dbapi.close()
         raise
     finally:
-        basedb.undodb.close()
+        # RestrictedDb has no `undodb` attribute; its close() already closes
+        # the undo log of the wrapped database (via close_db(self.__db)).
+        undodb = getattr(basedb, "undodb", None)
+        if undodb is not None:
+            undodb.close()
 
 
 def get_db_handle(readonly: bool = True) -> DbReadBase:
