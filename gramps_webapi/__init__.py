@@ -19,10 +19,14 @@
 
 import os
 
-# Gramps sets its locale from the environment when first imported. The API
-# translates into the language requested by the client, so the server locale
-# is always English. LANGUAGE takes precedence over LANG and LC_* for
-# translations and dates; the collation (LC_COLLATE) is left alone.
-os.environ["LANGUAGE"] = "en"
+# Gramps sets its locale from the environment when first imported. Upstream
+# forces English here because their hosted instance translates per-request via
+# the explicit ?locale= parameter. This self-hosted family server, however,
+# serves Russian users whose UI history predates that change: frontend call
+# sites that omit ?locale (relatives, relations, LLM chat tools) must keep
+# falling back to Russian, exactly as before v3.25 forced LANGUAGE=en.
+# LANGUAGE takes precedence over LANG and LC_* for translations and dates;
+# the collation (LC_COLLATE) is left alone.
+os.environ["LANGUAGE"] = "ru"
 
 from ._version import __version__  # noqa: E402
