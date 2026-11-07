@@ -350,12 +350,19 @@ class MetadataResource(ProtectedResource, GrampsJSONEncoder):
         if args["surnames"]:
             result["surnames"] = db_handle.get_surname_list()
         data = db_handle.get_summary()
+        # Downstream (server locale ru): DbGeneric.get_summary() keys are
+        # gettext-translated (e.g. "Schema version" -> "Версия схемы" under
+        # LANGUAGE=ru), so comparing against literal English strings drops the
+        # schema field from the response and the frontend's schema check then
+        # crashes on a missing field. Translate the expected keys through the
+        # same locale so the match is language-independent.
+        _summary_locale = GRAMPS_LOCALE.translation.gettext
         for item in data:
-            if item == "Database version":
+            if item == _summary_locale("Database version"):
                 result["database"]["version"] = data[item]
-            elif item == "Database module version":
+            elif item == _summary_locale("Database module version"):
                 result["database"]["module"] = data[item]
-            elif item == "Schema version":
+            elif item == _summary_locale("Schema version"):
                 result["database"]["schema"] = data[item]
         if isinstance(db_handle, DbGeneric):
             result["database"]["actual_schema"] = db_handle.get_schema_version()
