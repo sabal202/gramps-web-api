@@ -22,16 +22,17 @@
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any, BinaryIO, Optional, Tuple, Union
+from typing import IO, Any, BinaryIO, Optional, Tuple, Union
 
 from flask import jsonify, make_response, send_file, send_from_directory, current_app
 from gramps.gen.db.base import DbReadBase
 from gramps.gen.errors import HandleError
 from gramps.gen.lib import Media
 from PIL import Image
-from werkzeug.datastructures import FileStorage
 
 from gramps_webapi.const import MIME_AVIF, MIME_PNG
 
@@ -326,7 +327,7 @@ class LocalFileHandler(FileHandler):
 
 
 def upload_file_local(
-    base_dir: FilenameOrPath, rel_path: FilenameOrPath, stream: BinaryIO
+    base_dir: FilenameOrPath, rel_path: FilenameOrPath, stream: IO[bytes]
 ) -> None:
     """Upload a file from a stream to a path inside the base directory.
 
@@ -339,8 +340,8 @@ def upload_file_local(
         raise ValueError(f"File {path} is not within the base directory.")
     # create folders if necessary
     os.makedirs(path.parent, exist_ok=True)
-    fs = FileStorage(stream)
-    fs.save(path)
+    with open(path, "wb") as out:
+        shutil.copyfileobj(stream, out)
 
 
 def get_checksum(fp) -> str:
@@ -358,10 +359,11 @@ def get_checksum(fp) -> str:
     return md5sum
 
 
-def process_file(stream: Union[Any, BinaryIO]) -> Tuple[str, int, BinaryIO]:
+def process_file(stream: Union[Any, BinaryIO]) -> Tuple[str, int, IO[bytes]]:
     """Process a file from a stream that has a read method."""
-    fp = BytesIO()
-    fp.write(stream.read())
+    # copy in chunks, spilling to disk, instead of holding the body in memory twice
+    fp = tempfile.SpooledTemporaryFile(max_size=10 * 1024 * 1024)
+    shutil.copyfileobj(stream, fp)
     fp.seek(0)
     checksum = get_checksum(fp)
     size = fp.tell()

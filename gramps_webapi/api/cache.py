@@ -141,8 +141,22 @@ def skip_cache_missing_media(*args, **kwargs) -> bool:
     return g.cached_media is None
 
 
+def is_cacheable_response(rv) -> bool:
+    """Only cache successful responses.
+
+    Since Flask-Caching 2.5.0, an exception raised by `abort()` is cached as
+    well. An error can depend on the server rather than the tree or the file
+    (e.g. an addon or OpenCV that isn't installed yet), so it must not be served
+    until the tree changes, or for good from the thumbnail cache.
+    The view may return something other than a `Response`, e.g. a string.
+    """
+    return getattr(rv, "status_code", 200) < 400
+
+
 _request_cached = request_cache.cached(
-    make_cache_key=make_cache_key_request, unless=skip_cache_condition_request
+    make_cache_key=make_cache_key_request,
+    unless=skip_cache_condition_request,
+    response_filter=is_cacheable_response,
 )
 
 
@@ -160,7 +174,12 @@ def request_cache_decorator(f: Callable) -> Callable:
         g.pop("request_cache_key", None)
         rv = cached_f(*args, **kwargs)
         cache_key = g.pop("request_cache_key", None)
-        if cache_key and isinstance(rv, Response) and rv.status_code == 200:
+        if (
+            cache_key
+            and isinstance(rv, Response)
+            and rv.status_code == 200
+            and not getattr(rv, "_has_custom_etag", False)
+        ):
             rv.set_etag(hashlib.sha256(cache_key.encode()).hexdigest())
         return rv
 
@@ -168,7 +187,9 @@ def request_cache_decorator(f: Callable) -> Callable:
 
 
 thumbnail_cache_decorator = thumbnail_cache.cached(
-    make_cache_key=make_cache_key_thumbnails, unless=skip_cache_missing_media
+    make_cache_key=make_cache_key_thumbnails,
+    unless=skip_cache_missing_media,
+    response_filter=is_cacheable_response,
 )
 
 
@@ -235,7 +256,9 @@ def make_cache_key_tiles(*args, **kwargs):
 
 
 tile_cache_decorator = thumbnail_cache.cached(
-    make_cache_key=make_cache_key_tiles, unless=skip_cache_missing_media
+    make_cache_key=make_cache_key_tiles,
+    unless=skip_cache_missing_media,
+    response_filter=is_cacheable_response,
 )
 
 
@@ -258,7 +281,9 @@ def make_cache_key_face_detection(*args, **kwargs):
 
 
 face_detection_cache_decorator = thumbnail_cache.cached(
-    make_cache_key=make_cache_key_face_detection, unless=skip_cache_missing_media
+    make_cache_key=make_cache_key_face_detection,
+    unless=skip_cache_missing_media,
+    response_filter=is_cacheable_response,
 )
 
 

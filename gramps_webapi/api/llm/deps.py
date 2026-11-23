@@ -22,6 +22,24 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from gramps.gen.db import DbTxn
+from gramps.gen.db.base import DbWriteBase
+
+from ...types import TransactionJson
+
+# a change to the database, applied within a transaction
+Change = Callable[[DbWriteBase, DbTxn], None]
+
+
+@dataclass
+class Proposal:
+    """Changes proposed by the agent, awaiting the user's approval."""
+
+    changes: list[Change] = field(default_factory=list)
+    summaries: list[str] = field(default_factory=list)
+    # dry run of all changes, replayed when the user approves them
+    transaction: TransactionJson = field(default_factory=list)
+
 
 @dataclass
 class AgentDeps:
@@ -37,3 +55,5 @@ class AgentDeps:
     # tool and as the default anchor for relationship/relatives tools. Empty/None
     # when the user has not set a home person.
     home_person_gramps_id: str | None = field(default=None)
+    # None unless the agent may propose changes
+    proposal: Proposal | None = field(default=None)

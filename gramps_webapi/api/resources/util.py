@@ -77,6 +77,7 @@ from gramps.gen.utils.db import (
 )
 from gramps.gen.utils.grampslocale import GrampsLocale
 from gramps.gen.utils.id import create_id
+from gramps.gen.utils.location import get_location_list
 from gramps.gen.utils.place import conv_lat_lon
 from gramps.gen.display.name import displayer as default_name_displayer
 
@@ -604,7 +605,7 @@ def get_event_profile_for_object(
 
 
 def get_place_name_for_event(db_handle: DbReadBase, event: Event) -> str:
-    """Get place name for an event."""
+    """Get the name a place had at the date of an event."""
     place_handle = event.get_place_handle()
     if not place_handle:
         return ""
@@ -614,10 +615,9 @@ def get_place_name_for_event(db_handle: DbReadBase, event: Event) -> str:
         return ""
     if not place:
         return ""
-    place_name = place.get_name()
-    if not place_name:
-        return ""
-    return place_name.value
+    # as in Gramps' place display, the first entry is the place itself,
+    # named as it was at the event's date
+    return get_location_list(db_handle, place, event.get_date_object())[0][0]
 
 
 def get_event_profile_for_handle(
@@ -2194,38 +2194,59 @@ def truncate_import_report(
     The GEDCOM importer emits its whole report as a single message with one
     line per problem, so its size is unbounded in the size of a bad input file
     and would otherwise end up verbatim in the Celery result backend. The
-    report is truncated at a line boundary, keeping the beginning - which
-    carries the importer's summary line - and appending a count of what was
-    dropped.
+    report is truncated at line boundaries, keeping both ends: the beginning
+    carries the importer's summary line, the end the most consequential
+    findings - the GEDCOM importer only reports the records it had to
+    synthesise for missing references after all line-level problems. A
+    message counting the omitted lines takes the place of the middle.
     """
     if sum(len(message) for message in messages) <= max_chars:
         return messages
-    kept: list[str] = []
-    budget = max_chars
-    omitted = 0
-    for message in messages:
-        if budget <= 0:
-            omitted += message.count("\n") + 1
-            continue
-        if len(message) <= budget:
-            kept.append(message)
-            budget -= len(message)
-            continue
-        lines = message.split("\n")
-        kept_lines: list[str] = []
-        for line in lines:
-            if len(line) + 1 > budget:
-                break
-            kept_lines.append(line)
-            budget -= len(line) + 1
-        omitted += len(lines) - len(kept_lines)
-        if kept_lines:
-            kept.append("\n".join(kept_lines))
-        # everything after the first partial message is dropped
-        budget = 0
-    if omitted:
-        kept.append(f"[Report truncated: {omitted} further lines omitted.]")
-    return kept
+    # (message index, line) pairs, so kept lines can be regrouped by message
+    lines = [
+        (index, line)
+        for index, message in enumerate(messages)
+        for line in message.split("\n")
+    ]
+    budget = max_chars * 2 // 3
+    head_end = 0
+    while head_end < len(lines) and len(lines[head_end][1]) + 1 <= budget:
+        budget -= len(lines[head_end][1]) + 1
+        head_end += 1
+    # the tail gets the rest, including what the head left unused
+    budget += max_chars - max_chars * 2 // 3
+    tail_start = len(lines)
+    while tail_start > head_end and len(lines[tail_start - 1][1]) + 1 <= budget:
+        budget -= len(lines[tail_start - 1][1]) + 1
+        tail_start -= 1
+    omitted = tail_start - head_end
+    return [
+        *_group_lines(lines[:head_end]),
+        f"[Report truncated: {omitted} further lines omitted.]",
+        *_group_lines(lines[tail_start:]),
+    ]
+
+
+def _group_lines(lines: list[tuple[int, str]]) -> list[str]:
+    """Join consecutive lines from the same message back into one message."""
+    messages: list[str] = []
+    previous = None
+    for index, line in lines:
+        if index == previous:
+            messages[-1] += "\n" + line
+        else:
+            messages.append(line)
+            previous = index
+    return messages
+
+
+def _hide_dir(message: str, file_name: FilenameOrPath) -> str:
+    """Strip the directory of `file_name` from an importer's message.
+
+    Keeps the server's directory layout out of responses, consistent with
+    `ErrorRaisingMixin.hidden_dir` for Gramps' own importers.
+    """
+    return message.replace(os.path.dirname(str(file_name)) + os.sep, "")
 
 
 def run_import(
@@ -2234,24 +2255,32 @@ def run_import(
     extension: str,
     delete: bool = True,
     task: Optional[Task] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> list[str]:
     """Import a file.
 
     Returns the importer's diagnostic messages, if it emitted any, truncated to
     `MAX_IMPORT_REPORT_CHARS`. The GEDCOM 5.x importer reports every line it
-    could not parse this way; other importers, including the GEDCOM 7 one,
-    generally return an empty list.
+    could not parse this way, the GEDCOM 7 importer everything it left out.
+    Other importers generally return an empty list.
+
+    Gramps' own importers report progress to `task`; the GEDCOM 7 importer
+    calls `progress_cb` with the current and total number of steps instead.
     """
     if extension.lower() == "ged" and detect_gedcom_major_version(str(file_name)) == 7:
         try:
-            gramps_gedcom7.import_gedcom(input_file=file_name, db=db_handle)
+            report = gramps_gedcom7.import_gedcom(
+                input_file=file_name, db=db_handle, progress=progress_cb
+            )
         except ValueError as e:
             # ValueError indicates invalid file format or encoding (e.g., not UTF-8)
-            abort_with_message(422, f"Invalid GEDCOM file: {e}")
+            abort_with_message(
+                422, f"Invalid GEDCOM file: {_hide_dir(str(e), file_name)}"
+            )
         except Exception as e:
             # Unexpected errors - log for debugging
             current_app.logger.exception("GEDCOM7 import failed with unexpected error")
-            abort_with_message(500, f"Import failed: {e}")
+            abort_with_message(500, f"Import failed: {_hide_dir(str(e), file_name)}")
         finally:
             if delete:
                 try:
@@ -2261,7 +2290,7 @@ def run_import(
                     current_app.logger.warning(
                         f"Failed to delete temporary file {file_name}: {e}"
                     )
-        return []
+        return truncate_import_report(report.messages())
     if extension.lower() == "gramps":
         # Remove mediapath tag from Gramps XML files before import
         # This is necessary because the mediapath tag can cause import failures
@@ -2283,12 +2312,23 @@ def run_import(
                 user = ImportUser()
             user.hidden_dir = os.path.dirname(str(file_name))
             user.error_messages = []
-            result = import_function(db_handle, str(file_name), user)
-            if delete:
-                os.remove(file_name)
+            try:
+                result = import_function(db_handle, str(file_name), user)
+            finally:
+                if delete:
+                    try:
+                        os.remove(file_name)
+                    except OSError as e:
+                        # don't let cleanup failures mask the importer's error
+                        current_app.logger.warning(
+                            f"Failed to delete temporary file {file_name}: {e}"
+                        )
             if not result:
+                # The importers report unreadable input (corrupt file, invalid
+                # XML, unsupported version) via notify_error and an empty
+                # result, so this is the client's file, not a server fault.
                 abort_with_message(
-                    500, "\n\n".join(["Import failed", *user.error_messages])
+                    422, "\n\n".join(["Import failed", *user.error_messages])
                 )
             return truncate_import_report(user.error_messages + user.info_messages)
     return []
@@ -2297,12 +2337,14 @@ def run_import(
 def dry_run_import(
     file_name: FilenameOrPath,
     extension: str,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> Optional[dict[str, Any]]:
     """Import a file into an in-memory database.
 
     Returns the resulting object counts plus the importer's diagnostic
     messages under `messages`, so a dry run can show what the real import
     would complain about before anything is written to the tree.
+    `progress_cb` is passed on to `run_import`.
     """
     db_handle = make_database("sqlite")
     db_handle.load(":memory:")
@@ -2318,24 +2360,29 @@ def dry_run_import(
         config.get("preferences.rprefix"),
         config.get("preferences.nprefix"),
     )
-    messages = run_import(
-        db_handle=db_handle, file_name=file_name, extension=extension, delete=False
-    )
-    result: dict[str, Any] = {
-        "people": db_handle.get_number_of_people(),
-        "families": db_handle.get_number_of_families(),
-        "sources": db_handle.get_number_of_sources(),
-        "citations": db_handle.get_number_of_citations(),
-        "events": db_handle.get_number_of_events(),
-        "media": db_handle.get_number_of_media(),
-        "places": db_handle.get_number_of_places(),
-        "repositories": db_handle.get_number_of_repositories(),
-        "notes": db_handle.get_number_of_notes(),
-        "tags": db_handle.get_number_of_tags(),
-        "messages": messages,
-    }
-    db_handle.close()
-    return result
+    try:
+        messages = run_import(
+            db_handle=db_handle,
+            file_name=file_name,
+            extension=extension,
+            delete=False,
+            progress_cb=progress_cb,
+        )
+        return {
+            "people": db_handle.get_number_of_people(),
+            "families": db_handle.get_number_of_families(),
+            "sources": db_handle.get_number_of_sources(),
+            "citations": db_handle.get_number_of_citations(),
+            "events": db_handle.get_number_of_events(),
+            "media": db_handle.get_number_of_media(),
+            "places": db_handle.get_number_of_places(),
+            "repositories": db_handle.get_number_of_repositories(),
+            "notes": db_handle.get_number_of_notes(),
+            "tags": db_handle.get_number_of_tags(),
+            "messages": messages,
+        }
+    finally:
+        db_handle.close()
 
 
 def normalize_etag(etag: str | None) -> str | None:

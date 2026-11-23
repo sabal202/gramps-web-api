@@ -22,7 +22,6 @@
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from flask import abort
-from gramps.gen.config import config
 from gramps.gen.const import GRAMPS_LOCALE as glocale
 from gramps.gen.db.base import DbReadBase
 from gramps.gen.display.place import PlaceDisplay
@@ -45,7 +44,7 @@ from ..util import abort_with_message, get_db_handle, get_locale_for_language
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
 from .filters import apply_filter
-from .schemas import TimelineEventProfileSchema
+from .schemas import DateFormatQueryArgs, TimelineEventProfileSchema
 from ...const import NAME_FORMAT_REGEXP
 from .util import (
     display_date,
@@ -546,8 +545,6 @@ class Timeline:
                         if not age:
                             age = person_age
                     person["age"] = person_age
-            date_format = config.get("preferences.date-format")
-            self.locale.date_displayer.set_format(date_format)
             profile = {
                 "date": display_date(event.date, self.locale),
                 "description": event.description,
@@ -579,7 +576,7 @@ def prepare_events(args: Dict):
     return events
 
 
-class PersonTimelineQueryArgs(Schema):
+class PersonTimelineQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /people/<handle>/timeline."""
 
     ancestors = fields.Integer(
@@ -730,7 +727,9 @@ class PersonTimelineResource(ProtectedResource, GrampsJSONEncoder):
     @api_blueprint.arguments(PersonTimelineQueryArgs, location="query")
     def get(self, args: Dict, handle: str):
         """Get list of events in timeline for a person."""
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
         events = prepare_events(args)
         relatives = []
         if "relatives" in args:
@@ -770,7 +769,7 @@ class PersonTimelineResource(ProtectedResource, GrampsJSONEncoder):
         return self.response(200, payload, args, total_items=len(timeline.timeline))
 
 
-class FamilyTimelineQueryArgs(Schema):
+class FamilyTimelineQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /families/<handle>/timeline."""
 
     dates = fields.Str(
@@ -862,7 +861,9 @@ class FamilyTimelineResource(ProtectedResource, GrampsJSONEncoder):
     @api_blueprint.arguments(FamilyTimelineQueryArgs, location="query")
     def get(self, args: Dict, handle: str):
         """Get list of events in timeline for a family."""
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
         events = prepare_events(args)
         try:
             timeline = Timeline(
@@ -884,7 +885,7 @@ class FamilyTimelineResource(ProtectedResource, GrampsJSONEncoder):
         return self.response(200, payload, args, total_items=len(timeline.timeline))
 
 
-class TimelinePeopleQueryArgs(Schema):
+class TimelinePeopleQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /people/timeline."""
 
     anchor = fields.Str(
@@ -1019,7 +1020,9 @@ class TimelinePeopleResource(ProtectedResource, GrampsJSONEncoder):
     def get(self, args: Dict):
         """Get consolidated list of events in timeline for a list of people."""
         db_handle = get_db_handle()
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
         events = prepare_events(args)
         try:
             timeline = Timeline(
@@ -1069,7 +1072,7 @@ class TimelinePeopleResource(ProtectedResource, GrampsJSONEncoder):
         return self.response(200, payload, args, total_items=len(timeline.timeline))
 
 
-class TimelineFamiliesQueryArgs(Schema):
+class TimelineFamiliesQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /families/timeline."""
 
     dates = fields.Str(
@@ -1173,7 +1176,9 @@ class TimelineFamiliesResource(ProtectedResource, GrampsJSONEncoder):
     def get(self, args: Dict):
         """Get consolidated list of events in timeline for a list of families."""
         db_handle = get_db_handle()
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
         events = prepare_events(args)
         try:
             timeline = Timeline(

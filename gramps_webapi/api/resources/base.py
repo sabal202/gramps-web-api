@@ -21,9 +21,7 @@
 
 from typing import TypeVar
 
-import gramps_ql as gql
 from flask import abort, g, request
-from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
 from flask_jwt_extended import get_jwt_identity
 from gramps.gen.const import GRAMPS_LOCALE as glocale
 from gramps.gen.db import DbTxn
@@ -32,7 +30,6 @@ from gramps.gen.errors import HandleError
 from gramps.gen.lib.primaryobj import BasicPrimaryObject as GrampsObject
 from gramps.gen.utils.grampslocale import GrampsLocale
 from marshmallow import Schema
-from pyparsing.exceptions import ParseBaseException
 from webargs import fields, validate
 
 from gramps_webapi.api.people_families_cache import CachePeopleFamiliesProxy
@@ -61,6 +58,7 @@ from .delete import delete_object, remove_deleted_from_search_indices
 from .emit import GrampsJSONEncoder
 from .filters import apply_filter
 from .match import match_dates
+from .schemas import DateFormatQueryArgs
 from .sort import page_handles_in_sql, sort_handles_by_raw_data, sort_objects
 from .util import (
     abort_with_message,
@@ -182,7 +180,7 @@ class GrampsObjectResourceHelper(GrampsJSONEncoder):
         return query_method(handle)
 
 
-class GrampsObjectQueryArgs(Schema):
+class GrampsObjectQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /object/<handle>."""
 
     backlinks = fields.Boolean(
@@ -341,11 +339,16 @@ class GrampsObjectResource(GrampsObjectResourceHelper, Resource):
         if obj is None:
             # the private proxy returns None for private objects
             abort(404)
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
+        is_plain = not (set(request.args) - {"jwt"})
+        etag = hash_object(obj) if is_plain else None
         return self.response(
             200,
             self.full_object(obj, args, locale=locale),
             args,
+            etag=etag,
         )
 
     def delete(self, handle: str) -> ResponseReturnValue:
@@ -408,7 +411,7 @@ class GrampsObjectResource(GrampsObjectResourceHelper, Resource):
         return self.response(200, trans_dict, total_items=len(trans_dict))
 
 
-class GrampsObjectsQueryArgs(Schema):
+class GrampsObjectsQueryArgs(DateFormatQueryArgs):
     """Query arguments for GET /objects/."""
 
     backlinks = fields.Boolean(
@@ -471,16 +474,6 @@ class GrampsObjectsQueryArgs(Schema):
     format_options = fields.Str(
         validate=validate.Length(min=1),
         metadata={"description": "Options for media format processing."},
-    )
-    gql = fields.Str(
-        validate=validate.Length(min=1),
-        metadata={
-            "description": (
-                "A Gramps QL (GQL) query string used to filter the objects "
-                "(e.g. 'media_list.length >= 10'). Full syntax reference: "
-                "https://github.com/DavidMStraub/gramps-ql/blob/main/README.md"
-            )
-        },
     )
     gramps_id = fields.Str(
         validate=validate.Length(min=1),
@@ -604,7 +597,9 @@ class GrampsObjectsResource(GrampsObjectResourceHelper, Resource):
     @request_cache_decorator
     def get(self, args: dict) -> ResponseReturnValue:
         """Get all objects."""
-        locale = get_locale_for_language(args["locale"], default=True)
+        locale = get_locale_for_language(
+            args["locale"], default=True, date_format=args["date_format"]
+        )
         if "gramps_id" in args:
             obj = self.get_object_from_gramps_id(args["gramps_id"])
             if obj is None:
@@ -639,7 +634,6 @@ class GrampsObjectsResource(GrampsObjectResourceHelper, Resource):
         if args["page"] > 0 and not (
             "filter" in args
             or "rules" in args
-            or "gql" in args
             or args["dates"]
             or (self.gramps_class_name == "Media" and args.get("filemissing"))
         ):
@@ -682,29 +676,32 @@ class GrampsObjectsResource(GrampsObjectResourceHelper, Resource):
                     objects.append(self.full_object(obj, args, locale=locale))
                 return self.response(200, objects, args, total_items=total_items)
 
-        # load all objects to memory
-        objects_name = GRAMPS_OBJECT_PLURAL[self.gramps_class_name]
-        iter_objects_method = self.db_handle.method("iter_%s", objects_name)
-        assert iter_objects_method is not None  # type checker
         # ordered by handle, so ties are broken like in sort_handles_by_raw_data
-        objects = sorted(iter_objects_method(), key=lambda obj: obj.handle)
-
         if "filter" in args or "rules" in args:
-            handles = [obj.handle for obj in objects]
+            # filter the handles before loading objects, so that only the
+            # matching objects are loaded (rules evaluated in SQL, like
+            # MatchesQuery, load no other object at all)
+            handles = sorted(query_method())
             matching = set(
                 apply_filter(self.db_handle, args, self.gramps_class_name, handles)
             )
-            objects = [obj for obj in objects if obj.handle in matching]
-
-        if "gql" in args:
-            try:
-                objects = [
-                    obj
-                    for obj in objects
-                    if gql.match(query=args["gql"], obj=obj, db=self.db_handle)
-                ]
-            except (ParseBaseException, ValueError, TypeError) as e:
-                abort_with_message(422, str(e))
+            objects = []
+            for handle in handles:
+                if handle not in matching:
+                    continue
+                try:
+                    obj = self.get_object_from_handle(handle)
+                except HandleError:
+                    # object was deleted after the handles were fetched
+                    continue
+                if obj is not None:
+                    objects.append(obj)
+        else:
+            # load all objects to memory
+            objects_name = GRAMPS_OBJECT_PLURAL[self.gramps_class_name]
+            iter_objects_method = self.db_handle.method("iter_%s", objects_name)
+            assert iter_objects_method is not None  # type checker
+            objects = sorted(iter_objects_method(), key=lambda obj: obj.handle)
 
         if self.gramps_class_name == "Media" and args.get("filemissing"):
             objects = filter_missing_files(objects)

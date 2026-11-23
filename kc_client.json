@@ -1,0 +1,69 @@
+{
+  "id" : "19a6fc37-cfb2-4ced-82e7-e06ffce20c8b",
+  "clientId" : "gramps-web",
+  "name" : "Генеалогическое древо семьи",
+  "description" : "",
+  "rootUrl" : "https://gramps.sabal.pro",
+  "adminUrl" : "",
+  "baseUrl" : "https://gramps.sabal.pro",
+  "surrogateAuthRequired" : false,
+  "enabled" : true,
+  "alwaysDisplayInConsole" : true,
+  "clientAuthenticatorType" : "client-secret",
+  "secret" : "94VL9Wef3NiXWL1hrM6DbvYYpn4oNUSU",
+  "redirectUris" : [ "https://gramps.sabal.pro/api/oidc/callback/custom" ],
+  "webOrigins" : [ "https://gramps.sabal.pro" ],
+  "notBefore" : 0,
+  "bearerOnly" : false,
+  "consentRequired" : false,
+  "standardFlowEnabled" : true,
+  "implicitFlowEnabled" : false,
+  "directAccessGrantsEnabled" : false,
+  "serviceAccountsEnabled" : false,
+  "publicClient" : false,
+  "frontchannelLogout" : false,
+  "protocol" : "openid-connect",
+  "attributes" : {
+    "oidc.ciba.grant.enabled" : "false",
+    "client.secret.creation.time" : "1782379376",
+    "backchannel.logout.session.required" : "true",
+    "backchannel.logout.url" : "https://gramps.sabal.pro/api/oidc/backchannel-logout/",
+    "post.logout.redirect.uris" : "https://gramps.sabal.pro/*",
+    "display.on.consent.screen" : "false",
+    "oauth2.device.authorization.grant.enabled" : "false",
+    "backchannel.logout.revoke.offline.tokens" : "false"
+  },
+  "authenticationFlowBindingOverrides" : { },
+  "fullScopeAllowed" : true,
+  "nodeReRegistrationTimeout" : -1,
+  "protocolMappers" : [ {
+    "id" : "4251cca4-85f9-425c-a636-7390380d2861",
+    "name" : "docker-v2-allow-all-mapper",
+    "protocol" : "docker-v2",
+    "protocolMapper" : "docker-v2-allow-all-mapper",
+    "consentRequired" : false,
+    "config" : { }
+  }, {
+    "id" : "1057fce2-d49d-48df-a0f1-b03b7024c90d",
+    "name" : "gramps-client-roles",
+    "protocol" : "openid-connect",
+    "protocolMapper" : "oidc-usermodel-client-role-mapper",
+    "consentRequired" : false,
+    "config" : {
+      "multivalued" : "true",
+      "userinfo.token.claim" : "true",
+      "id.token.claim" : "false",
+      "access.token.claim" : "true",
+      "claim.name" : "resource_access.gramps-web.roles",
+      "jsonType.label" : "String",
+      "usermodel.clientRoleMapping.clientId" : "gramps-web"
+    }
+  } ],
+  "defaultClientScopes" : [ "web-origins", "acr", "roles", "profile", "email" ],
+  "optionalClientScopes" : [ "address", "phone", "offline_access", "microprofile-jwt" ],
+  "access" : {
+    "view" : true,
+    "configure" : true,
+    "manage" : true
+  }
+}

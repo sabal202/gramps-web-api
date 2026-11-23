@@ -26,7 +26,6 @@ from importlib import metadata
 from importlib.util import find_spec
 from typing import Any
 
-import gramps_ql as gql
 import limits
 from flask import Response, current_app
 from flask_jwt_extended import get_jwt_identity
@@ -198,7 +197,6 @@ def _get_server_metadata() -> dict[str, Any]:
             "schema": VERSION,
             "version": VERSION,
         },
-        "gramps_ql": {"version": gql.__version__},
         "gramps_object_query_language": {
             "version": metadata.version("gramps-object-query-language")
         },
@@ -219,6 +217,9 @@ def _get_server_metadata() -> dict[str, Any]:
             # semantic search was removed in 3.25.0; kept for older clients
             "semantic_search": False,
             "chat": bool(current_app.config["LLM_MODEL"]),
+            "chat_vision": bool(
+                current_app.config["LLM_MODEL"] and current_app.config["LLM_VISION"]
+            ),
             "face_detection": _get_face_detection_available(),
             "thumbnails": _get_thumbnail_support(),
             # may be stored in the database, so it is looked up rather than

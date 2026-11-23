@@ -253,7 +253,10 @@ class TestChat(unittest.TestCase):
         # Second turn — send message_history_raw back; verify it is accepted and returned again
         rv = self.client.post(
             "/api/chat/",
-            json={"query": "Follow-up question", "message_history_raw": message_history_raw},
+            json={
+                "query": "Follow-up question",
+                "message_history_raw": message_history_raw,
+            },
             headers=header,
         )
         assert rv.status_code == 200
@@ -261,3 +264,145 @@ class TestChat(unittest.TestCase):
         assert "message_history_raw" in rv.json
         assert isinstance(rv.json["message_history_raw"], str)
         assert len(rv.json["message_history_raw"]) > 0
+
+    @patch("gramps_webapi.api.llm.create_agent")
+    def test_chat_usage(self, mock_create_agent):
+        """Each chat is charged once, also when run by the task queue."""
+        from dataclasses import dataclass
+
+        from pydantic_ai import Agent
+
+        from gramps_webapi.api.tasks import process_chat
+        from gramps_webapi.auth import get_tree_usage
+
+        @dataclass
+        class TestDeps:
+            value: str = "test"
+
+        mock_create_agent.return_value = Agent("test", deps_type=TestDeps)
+        header = fetch_header(self.client, empty_db=True)
+        rv = self.client.get("/api/trees/", headers=header)
+        tree_id = rv.json[0]["id"]
+        rv = self.client.put(
+            f"/api/trees/{tree_id}", json={"min_role_ai": ROLE_OWNER}, headers=header
+        )
+        assert rv.status_code == 200
+        clear_token_cache()
+        header = fetch_header(self.client, empty_db=True)
+        app = self.client.application
+
+        def usage():
+            with app.app_context():
+                return get_tree_usage(tree_id)["usage_ai"] or 0
+
+        before = usage()
+        rv = self.client.post(TEST_URL, json={"query": "Hello"}, headers=header)
+        assert rv.status_code == 200
+        assert usage() == before + 1
+        rv = self.client.post(
+            TEST_URL + "?background=true", json={"query": "Hello"}, headers=header
+        )
+        assert rv.status_code == 200
+        assert usage() == before + 2
+        # as called by a Celery worker, without a request
+        with app.app_context():
+            process_chat(
+                tree=tree_id, user_id="user", query="Hello", include_private=False
+            )
+        assert usage() == before + 3
+
+    @patch("gramps_webapi.api.llm.create_agent")
+    def test_chat_images_usage(self, mock_create_agent):
+        """Each attached image counts as one more unit of AI usage."""
+        import base64
+        import io
+        from dataclasses import dataclass
+
+        from PIL import Image
+        from pydantic_ai import Agent
+
+        from gramps_webapi.auth import get_tree_usage
+
+        @dataclass
+        class TestDeps:
+            value: str = "test"
+
+        mock_create_agent.return_value = Agent("test", deps_type=TestDeps)
+        header = fetch_header(self.client, empty_db=True)
+        rv = self.client.get("/api/trees/", headers=header)
+        tree_id = rv.json[0]["id"]
+        rv = self.client.put(
+            f"/api/trees/{tree_id}", json={"min_role_ai": ROLE_OWNER}, headers=header
+        )
+        assert rv.status_code == 200
+        clear_token_cache()
+        header = fetch_header(self.client, empty_db=True)
+
+        output = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(output, format="PNG")
+        image = base64.b64encode(output.getvalue()).decode()
+        payload = {"query": "What is this?", "images": [image, image]}
+        app = self.client.application
+
+        def usage():
+            with app.app_context():
+                return get_tree_usage(tree_id)["usage_ai"] or 0
+
+        before = usage()
+        rv = self.client.post(TEST_URL, json=payload, headers=header)
+        assert rv.status_code == 422  # LLM_VISION is off
+        assert usage() == before
+        app.config["LLM_VISION"] = True
+        try:
+            rv = self.client.post(TEST_URL, json=payload, headers=header)
+            assert rv.status_code == 200
+            assert usage() == before + 3
+        finally:
+            app.config["LLM_VISION"] = False
+
+    @patch("gramps_webapi.api.llm.create_agent")
+    def test_chat_previous_proposal(self, mock_create_agent):
+        """previous_proposal is passed to the model, and must be a known value."""
+        from dataclasses import dataclass
+
+        from pydantic_ai import Agent
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+
+        @dataclass
+        class TestDeps:
+            value: str = "test"
+
+        seen = []
+
+        def model_function(messages, info):
+            seen.append(info.instructions)
+            return ModelResponse(parts=[TextPart(content="done")])
+
+        mock_create_agent.return_value = Agent(
+            FunctionModel(model_function), deps_type=TestDeps
+        )
+        header = fetch_header(self.client, empty_db=True)
+        rv = self.client.get("/api/trees/", headers=header)
+        tree_id = rv.json[0]["id"]
+        rv = self.client.put(
+            f"/api/trees/{tree_id}", json={"min_role_ai": ROLE_OWNER}, headers=header
+        )
+        assert rv.status_code == 200
+        clear_token_cache()
+        header = fetch_header(self.client, empty_db=True)
+
+        rv = self.client.post(
+            TEST_URL,
+            json={"query": "And his birth?", "previous_proposal": "rejected"},
+            headers=header,
+        )
+        assert rv.status_code == 422
+        assert not seen
+        rv = self.client.post(
+            TEST_URL,
+            json={"query": "And his birth?", "previous_proposal": "not_applied"},
+            headers=header,
+        )
+        assert rv.status_code == 200
+        assert "did not apply" in seen[0]

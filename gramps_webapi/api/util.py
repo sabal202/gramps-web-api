@@ -105,19 +105,30 @@ use_args = parser.use_args
 
 
 class InfoCollectorMixin:
-    """Mixin collecting `info` messages instead of discarding them.
+    """Mixin collecting `info` and `warn` messages instead of discarding them.
 
     Gramps delivers end-of-run reports - most notably the GEDCOM import report
     listing every line that could not be parsed - by calling `User.info()`,
-    whose default implementation does nothing. Classes using this mixin keep
-    the messages in `info_messages` so they can be returned to the client.
+    whose default implementation does nothing. Importers also call
+    `User.warn()` for problems they work around, like an outdated Gramps XML
+    version or a GEDCOM file exported by Legacy. Classes using this mixin keep
+    both kinds of message, in the order they were emitted, in `info_messages`
+    so they can be returned to the client.
     """
 
     info_messages: list[str]
 
     def info(self, msg1, infotext, parent=None, monospaced=False) -> None:
         """Collect information intended for the user."""
-        message = "\n".join(str(part) for part in (msg1, infotext) if part)
+        self._collect(msg1, infotext)
+
+    def warn(self, title, warning="") -> None:
+        """Collect a warning intended for the user."""
+        self._collect(title, warning)
+
+    def _collect(self, *parts) -> None:
+        """Join the non-empty parts into one message and keep it."""
+        message = "\n".join(str(part) for part in parts if part)
         if message:
             self.info_messages.append(message)
 
@@ -238,9 +249,6 @@ class UserTaskProgress(ErrorRaisingMixin, InfoCollectorMixin, UserBase):
         # Not needed for Web API
         return True
 
-    def warn(self, title: str, warning: str = "") -> None:
-        """Warn the user."""
-
 
 def get_db_manager(tree: str | None) -> WebDbManager:
     """Get an appropriate WebDbManager instance."""
@@ -311,15 +319,19 @@ def get_db_outside_request(
     return dbstate.db
 
 
-def close_db(db_handle: DbReadBase) -> None:
-    """Close the connection to the database including the undo log."""
+def close_db(db_handle: DbReadBase, update: bool = True) -> None:
+    """Close the connection to the database including the undo log.
+
+    If `update` is false, state that Gramps keeps in memory and writes on
+    closing, e.g. custom types, is discarded.
+    """
     if isinstance(db_handle, RestrictedDb):
-        # closes the undo log, too
+        # read-only, so there is nothing to discard; closes the undo log, too
         db_handle.close()
         return
     basedb = db_handle.basedb if isinstance(db_handle, ProxyDbBase) else db_handle
     try:
-        db_handle.close()
+        basedb.close(update=update)
     except Exception:
         # DbGeneric.close() saves the metadata before it closes the connection.
         # If saving fails, e.g. with "database is locked", the connection would
@@ -394,10 +406,51 @@ def get_db_handle(readonly: bool = True) -> DbReadBase:
     return g.db
 
 
+class _DateFormatLocale:
+    """Delegate a locale with a request-specific date displayer.
+
+    GrampsLocale instances are cached, so changing their displayer would leak
+    the requested format into other requests.
+    """
+
+    def __init__(self, base: GrampsLocale, date_format: int) -> None:
+        self._base = base
+        base_date_displayer = base.date_displayer
+        self.date_displayer = type(base_date_displayer)(date_format, blocale=base)
+        # Preserve the locale pattern if Gramps normalized its locale code.
+        self.date_displayer.dhformat = base_date_displayer.dhformat
+
+    def get_date(self, date: Any) -> str:
+        return self.date_displayer.display(date)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+
 def get_locale_for_language(
-    language: Optional[str], default: bool = False
-) -> GrampsLocale:
-    """Get GrampsLocale set to specified language."""
+    language: Optional[str],
+    default: bool = False,
+    date_format: Optional[int] = None,
+) -> Optional[GrampsLocale]:
+    """Get a GrampsLocale for a language, optionally with a date format.
+
+    Args:
+        language: Language code recognized by Gramps (for example, ``"de"``).
+            If it is None or unavailable, no locale is created from it.
+        default: If True and no locale was found for ``language``, use the
+            server's default locale (``GRAMPS_LOCALE``); otherwise return None.
+        date_format: Index of the date format in the selected locale's
+            ``date_displayer.formats``. If None, leave date formatting unchanged.
+            Ignored if no locale is available.
+
+    Returns:
+        The selected locale, or None if no locale was found and ``default`` is
+        False.
+
+    Aborts with HTTP 422 if ``date_format`` is outside the selected locale's
+    available formats.
+    """
+    locale = None
     if language is not None:
         catalog = GRAMPS_LOCALE.get_language_dict()
         for entry in catalog:
@@ -406,10 +459,15 @@ def get_locale_for_language(
                 locale_code = LOCALE_MAP.get(language, language)
                 if "UTF" not in locale_code.upper():
                     locale_code = f"{locale_code}.UTF-8"
-                return GrampsLocale(lang=locale_code)
-    if default:
-        return GRAMPS_LOCALE
-    return None
+                locale = GrampsLocale(lang=locale_code)
+                break
+    if locale is None and default:
+        locale = GRAMPS_LOCALE
+    if locale is not None and date_format is not None:
+        if date_format < 0 or date_format >= len(locale.date_displayer.formats):
+            abort_with_message(422, f"Invalid date_format for locale: {date_format}")
+        locale = _DateFormatLocale(locale, date_format)
+    return locale
 
 
 def get_buffer_for_file(filename: str, delete=True, not_found=False) -> BinaryIO:

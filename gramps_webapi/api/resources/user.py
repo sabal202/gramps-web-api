@@ -89,7 +89,7 @@ from ..util import (
     tree_exists,
 )
 from . import LimitedScopeProtectedResource, ProtectedResource, Resource
-from .schemas import UserSchema
+from .schemas import RegistrationConfigSchema, UserSchema
 from .token import get_tokens, get_tree_id_and_permissions
 
 
@@ -138,6 +138,22 @@ def abort_if_higher_role(user_id: str) -> None:
         abort_with_message(403, "Not allowed to modify a user with a higher role")
     if role > own_role:
         abort_with_message(403, "Not allowed to modify a user with a higher role")
+
+
+def abort_unless_lower_role(user_id: str) -> None:
+    """Abort unless the user has a strictly lower role than the requester.
+
+    Stricter than `abort_if_higher_role`, for setting another user's password
+    without their old one, which lets the requester sign in as that user.
+    """
+    message = "Not allowed to set the password of a user with an equal or higher role"
+    try:
+        role = get_role(str(user_id))
+        own_role = get_role(get_jwt_identity())
+    except ValueError:
+        abort_with_message(403, message)
+    if role >= own_role:
+        abort_with_message(403, message)
 
 
 def abort_if_local_auth_disabled() -> None:
@@ -332,6 +348,15 @@ class UserPutBodyArgs(Schema):
         required=False,
         metadata={"description": "Tree ID the user belongs to."},
     )
+    password = fields.Str(
+        required=False,
+        metadata={
+            "description": "A new password for another user, set without their old"
+            " one. Only for a user with a strictly lower role than yours, and not"
+            " for your own user (use the password change endpoint). Ends all of"
+            " the user's sessions."
+        },
+    )
 
 
 class UserPostBodyArgs(Schema):
@@ -403,8 +428,24 @@ class UserResource(UserChangeBase):
 
     @api_blueprint.arguments(UserPutBodyArgs, location="json")
     def put(self, args, user_name: str):
-        """Update a user's details."""
+        """Update a user's details.
+
+        With `password`, sets another user's password without their old one,
+        for example a service account's, and ends all of their sessions. The
+        response never carries the password.
+        """
         user_name, other_tree = self.prepare_edit(user_name)
+
+        if "password" in args:
+            user_id = get_guid(user_name)
+            if is_own_user(user_id):
+                abort_with_message(
+                    400, "Use the password change endpoint for your own password"
+                )
+            abort_if_local_auth_disabled()
+            if not args["password"]:
+                abort_with_message(400, "Empty password provided")
+            abort_unless_lower_role(user_id)
 
         if "name_new" in args:
             new_name = args["name_new"].strip()
@@ -462,6 +503,7 @@ class UserResource(UserChangeBase):
             modify_user(
                 name=user_name,
                 name_new=args.get("name_new"),
+                password=args.get("password"),
                 email=args.get("email"),
                 fullname=args.get("full_name"),
                 role=args.get("role"),
@@ -558,27 +600,56 @@ class UserRegisterBodyArgs(Schema):
     )
 
 
+def is_registration_disabled(tree: Optional[str]) -> bool:
+    """Check if the registration is disabled.
+
+    Without a tree, owners of any tree count.
+    """
+    if current_app.config["REGISTRATION_DISABLED"]:
+        return True
+    # without local authentication, a registered user could never log in
+    if is_local_auth_disabled():
+        return True
+    # check if there are tree owners or, in a single-tree setup,
+    # tree admins
+    if current_app.config["TREE"] == TREE_MULTI:
+        roles = [ROLE_OWNER]
+    else:
+        roles = [ROLE_OWNER, ROLE_ADMIN]
+    if get_number_users(tree=tree, roles=roles) == 0:
+        # no users authorized to enable new accounts:
+        # registration disabled
+        return True
+    return False
+
+
+class RegistrationConfigQueryArgs(Schema):
+    """Query arguments for GET /register/config/."""
+
+    tree = fields.Str(
+        required=False,
+        metadata={"description": "Tree ID the user would register for."},
+    )
+
+
+class RegistrationConfigResource(Resource):
+    """Resource telling clients whether registration is possible."""
+
+    @limiter.limit("60/minute")
+    @api_blueprint.response(200, RegistrationConfigSchema())
+    @api_blueprint.arguments(RegistrationConfigQueryArgs, location="query")
+    def get(self, args):
+        """Get whether new users can register.
+
+        Gives the same answer as a registration attempt would: an unknown
+        tree is reported as disabled rather than as an error, so that the
+        endpoint does not reveal which trees exist.
+        """
+        return {"enabled": not is_registration_disabled(tree=args.get("tree"))}
+
+
 class UserRegisterResource(Resource):
     """Resource for registering a new user."""
-
-    def _is_disabled(self, tree: Optional[str]) -> bool:
-        """Check if the registration is disabled."""
-        if current_app.config["REGISTRATION_DISABLED"]:
-            return True
-        # without local authentication, a registered user could never log in
-        if is_local_auth_disabled():
-            return True
-        # check if there are tree owners or, in a single-tree setup,
-        # tree admins
-        if current_app.config["TREE"] == TREE_MULTI:
-            roles = [ROLE_OWNER]
-        else:
-            roles = [ROLE_OWNER, ROLE_ADMIN]
-        if get_number_users(tree=tree, roles=roles) == 0:
-            # no users authorized to enable new accounts:
-            # registration disabled
-            return True
-        return False
 
     @limiter.limit("1/second")
     @api_blueprint.arguments(UserRegisterBodyArgs, location="json")
@@ -590,7 +661,7 @@ class UserRegisterResource(Resource):
         # do not allow registration if no tree owner account exists!
         # Checked before the tree argument, so that a disabled registration
         # returns 405 in every setup. Without a tree, owners of any tree count.
-        if self._is_disabled(tree=args.get("tree")):
+        if is_registration_disabled(tree=args.get("tree")):
             abort_with_message(405, "Registration is disabled")
         if not args.get("tree") and current_app.config["TREE"] == TREE_MULTI:
             # if multi-tree is enabled, tree is required

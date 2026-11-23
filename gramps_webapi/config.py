@@ -52,6 +52,9 @@ class DefaultConfig(object):
     EMAIL_USE_STARTTLS = None
     DEFAULT_FROM_EMAIL = ""
     BASE_URL = "http://localhost/"
+    # number of trusted reverse proxies setting X-Forwarded-For; only set this
+    # if the app is reachable exclusively through them, else IPs can be spoofed
+    PROXY_FIX_X_FOR = 0
     CORS_EXPOSE_HEADERS = ["X-Total-Count"]
     STATIC_PATH = "static"
     REQUEST_CACHE_CONFIG = {
@@ -109,6 +112,8 @@ class DefaultConfig(object):
     LLM_MAX_TOKENS = 200_000
     LLM_MAX_OUTPUT_TOKENS = None
     LLM_SYSTEM_PROMPT = None
+    LLM_ALLOW_WRITE_PROPOSALS = False
+    LLM_VISION = False  # whether the model accepts images
     # ignored since semantic search was removed in 3.25.0, see deprecations.py
     VECTOR_EMBEDDING_MODEL = ""
     VECTOR_EMBEDDING_BASE_URL = None
@@ -126,6 +131,7 @@ class DefaultConfig(object):
     OIDC_AUTO_REDIRECT = False
     OIDC_USERNAME_CLAIM = "preferred_username"
     OIDC_NAME = "OIDC"
+    OIDC_ALLOWED_REDIRECT_URIS: list[str] = []
     PILLOW_MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     MAX_THUMBNAIL_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
     MAX_MEDIA_ARCHIVE_UPLOAD_BYTES = None

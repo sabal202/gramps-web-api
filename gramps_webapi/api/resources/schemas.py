@@ -1,9 +1,10 @@
-"""Response schemas for the Gramps Web API.
+"""Shared request and response schemas for the Gramps Web API.
 
-Each class defines the shape of a response object and is used exclusively for
-OpenAPI documentation via flask-smorest ``@api_blueprint.response()``; they do
-**not** perform serialisation because most endpoints return a pre-built Flask
-``Response`` object that flask-smorest passes through unchanged.
+Response schemas define the shape of a response object and are used exclusively
+for OpenAPI documentation via flask-smorest ``@api_blueprint.response()``; they
+do **not** perform serialisation because most endpoints return a pre-built Flask
+``Response`` object that flask-smorest passes through unchanged. Reusable request
+schemas define and validate query arguments.
 
 All schemas set ``Meta.unknown = INCLUDE`` so that no data is silently dropped
 if one of these schemas is accidentally used for de-serialisation, and to avoid
@@ -17,7 +18,14 @@ import base64
 import binascii
 from urllib.parse import urlsplit
 
-from marshmallow import INCLUDE, Schema, ValidationError, fields, validate
+from marshmallow import (
+    INCLUDE,
+    Schema,
+    ValidationError,
+    fields,
+    validate,
+    validates_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +38,22 @@ class _Base(Schema):
 
     class Meta:
         unknown = INCLUDE
+
+
+class DateFormatQueryArgs(Schema):
+    """Query argument for choosing a Gramps date display format."""
+
+    date_format = fields.Integer(
+        load_default=None,
+        validate=validate.Range(min=0),
+        metadata={
+            "description": (
+                "Gramps date format index. If omitted, the server's default "
+                "date format is used. 0 is ISO YYYY-MM-DD; higher values select "
+                "locale-specific formats."
+            )
+        },
+    )
 
 
 def validate_push_endpoint(value: str) -> str:
@@ -1964,6 +1988,14 @@ class OIDCConfigSchema(_Base):
     )
 
 
+class RegistrationConfigSchema(_Base):
+    """Registration configuration returned by the /register/config/ endpoint."""
+
+    enabled = fields.Bool(
+        metadata={"description": "Whether new users can register."},
+    )
+
+
 class OIDCTokenExchangeSchema(_Base):
     """Body of a POST to the /oidc/tokens/ exchange endpoint."""
 
@@ -1972,6 +2004,15 @@ class OIDCTokenExchangeSchema(_Base):
         metadata={
             "description": "Single-use code from the fragment of the OIDC login"
             " redirect."
+        },
+    )
+    code_verifier = fields.Str(
+        required=False,
+        # RFC 7636, section 4.1
+        validate=validate.Regexp(r"^[A-Za-z0-9._~-]{43,128}$"),
+        metadata={
+            "description": "PKCE code verifier (RFC 7636), required for a code"
+            " issued to a native app redirect URI."
         },
     )
 
@@ -2373,6 +2414,34 @@ class RelationshipItemSchema(_Base):
     )
 
 
+class RelationshipPathStepSchema(_Base):
+    """One person on a chain of family links."""
+
+    handle = fields.Str(metadata={"description": "Handle of the person."})
+    link = fields.Str(
+        allow_none=True,
+        validate=validate.OneOf(["parent", "child", "spouse", "sibling"]),
+        metadata={
+            "description": "How the person is linked to the person before them (null for the first person)."
+        },
+    )
+    relationship_string = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": "Relationship to the first person, or null when it has no name."
+        },
+    )
+
+
+class RelationshipPathSchema(_Base):
+    """A chain of family links between two people."""
+
+    steps = fields.List(
+        fields.Nested(RelationshipPathStepSchema),
+        metadata={"description": "The people on the path, starting with person 1."},
+    )
+
+
 class ObjectCountsSchema(_Base):
     """Counts of primary object types in the database."""
 
@@ -2540,6 +2609,9 @@ class ServerSchema(_Base):
     chat = fields.Bool(
         metadata={"description": "Whether the AI chat endpoint is available."},
     )
+    chat_vision = fields.Bool(
+        metadata={"description": "Whether images can be attached to AI chat queries."},
+    )
     face_detection = fields.Bool(
         metadata={
             "description": "Whether face detection in images is available"
@@ -2624,9 +2696,6 @@ class MetadataServerSchema(_Base):
     )
     gramps_webapi = fields.Dict(
         metadata={"description": "Information about the Gramps Web API version."},
-    )
-    gramps_ql = fields.Dict(
-        metadata={"description": "Information about the Gramps QL library."},
     )
     gramps_object_query_language = fields.Dict(
         metadata={
@@ -3006,6 +3075,23 @@ class SearchResultSchema(_Base):
     )
 
 
+class ChatProposalSchema(_Base):
+    """Changes proposed by the AI assistant, awaiting the user's approval."""
+
+    summary = fields.List(
+        fields.Str(),
+        metadata={"description": "Plain-language description of each change."},
+    )
+    transaction = fields.List(
+        fields.Nested(TransactionSchema),
+        metadata={
+            "description": "Dry run of all changes. Nothing has been written; "
+            "to apply the changes, POST this to /transactions/, which rejects "
+            "them if any object has been modified in the meantime."
+        },
+    )
+
+
 class ChatResponseSchema(_Base):
     """Response from the AI chat endpoint."""
 
@@ -3021,6 +3107,14 @@ class ChatResponseSchema(_Base):
         metadata={
             "description": "Serialized full message history for multi-turn conversations. "
             "Pass back in subsequent requests as message_history_raw to preserve tool call context."
+        },
+    )
+    proposal = fields.Nested(
+        ChatProposalSchema,
+        metadata={
+            "description": "Changes the assistant proposes, if any. Only "
+            "present if the server allows write proposals and the user may "
+            "add, edit and delete objects."
         },
     )
 
@@ -3173,6 +3267,15 @@ class DnaMatchSchema(_Base):
     )
     relation = fields.Str(
         metadata={"description": "Estimated relationship to the matching person."},
+    )
+    distance = fields.Int(
+        allow_none=True,
+        metadata={
+            "description": "Number of generations from the closest common ancestor "
+            "to the person plus the number to the matching person, or null if "
+            "they are unrelated or no relationship could be computed, e.g. "
+            "because the calculation aborted on a relationship loop."
+        },
     )
     ancestor_handles = fields.List(
         fields.Str(),
@@ -3392,6 +3495,19 @@ class UserOIDCUnlinkSchema(_Base):
     )
 
 
+class UserMergeSchema(_Base):
+    """Request body for merging a user into another one."""
+
+    source = fields.Str(
+        required=True,
+        validate=validate.Length(min=1),
+        metadata={
+            "description": "Name of the user to merge into the user in the path."
+            " This user is deleted."
+        },
+    )
+
+
 class UserSchema(_Base):
     """Details about a user."""
 
@@ -3435,6 +3551,85 @@ class UserSchema(_Base):
             "description": "Where the account comes from: `Local` or the"
             " OIDC provider's display name. Only present in the user list"
             " if OIDC is enabled."
+        },
+    )
+
+
+# ===========================================================================
+# Bulk edit
+# ===========================================================================
+
+from .bulk_edit import EDIT_OPS, EDITABLE_NAMESPACES, TAG_OPS  # noqa: E402
+
+
+class EditOperationSchema(Schema):
+    """A single edit operation for POST /objects/edit-by-handle."""
+
+    op = fields.Str(
+        required=True,
+        validate=validate.OneOf(list(EDIT_OPS)),
+        metadata={
+            "description": "Operation: 'add_tag' or 'remove_tag' (require 'handle'), or 'set_private' (requires 'value')."
+        },
+    )
+    handle = fields.Str(
+        validate=validate.Length(min=1),
+        metadata={"description": "Handle of the tag to add or remove."},
+    )
+    value = fields.Boolean(
+        metadata={
+            "description": "Privacy to set. Only the primary object's privacy is changed, not that of its secondary objects (e.g. references)."
+        },
+    )
+
+    @validates_schema
+    def validate_fields(self, data, **kwargs):
+        """Require exactly the fields the operation uses."""
+        if data["op"] in TAG_OPS:
+            required, forbidden = "handle", "value"
+        else:
+            required, forbidden = "value", "handle"
+        if required not in data:
+            raise ValidationError(f"Missing for '{data['op']}'.", field_name=required)
+        if forbidden in data:
+            raise ValidationError(
+                f"Not allowed for '{data['op']}'.", field_name=forbidden
+            )
+
+
+class EditObjectsByHandleArgs(Schema):
+    """Request body for POST /objects/edit-by-handle."""
+
+    namespace = fields.Str(
+        required=True,
+        validate=validate.OneOf(EDITABLE_NAMESPACES),
+        metadata={"description": "Object type of the objects to edit (e.g. 'people')."},
+    )
+    handles = fields.List(
+        fields.Str(validate=validate.Length(min=1)),
+        required=True,
+        validate=validate.Length(min=1),
+        metadata={
+            "description": "List of handles of the objects to edit. Handles of objects that do not exist are skipped."
+        },
+    )
+    operations = fields.List(
+        fields.Nested(EditOperationSchema),
+        required=True,
+        validate=validate.Length(min=1),
+        metadata={
+            "description": "Operations to apply to each object, in order, in a single transaction."
+        },
+    )
+
+
+class EditObjectsByHandleQueryArgs(Schema):
+    """Query arguments for POST /objects/edit-by-handle."""
+
+    background = fields.Boolean(
+        load_default=False,
+        metadata={
+            "description": "If true and Celery is configured, edit the objects in the background and return HTTP 202. Use this for anything but a few objects.",
         },
     )
 

@@ -79,6 +79,7 @@ from .media import (
 )
 from .media_importer import MediaImporter
 from .report import run_report
+from .resources.bulk_edit import edit_objects_by_handle
 from .resources.delete import (
     delete_all_objects,
     delete_objects_by_handle,
@@ -98,12 +99,7 @@ from .resources.util import (
     transaction_to_json,
 )
 from .search import get_search_indexer
-from .telemetry import (
-    get_telemetry_payload,
-    send_telemetry,
-    telemetry_sent_last_24h,
-    update_telemetry_timestamp,
-)
+from .telemetry import send_telemetry
 from .util import (
     UserTaskProgress,
     check_quota_people,
@@ -114,6 +110,7 @@ from .util import (
     get_locale_for_language,
     gramps_object_from_dict,
     send_email,
+    update_usage_ai,
     update_usage_people,
     upgrade_gramps_database,
 )
@@ -442,35 +439,44 @@ def import_file(
     dry_run: bool = False,
 ):
     """Import a file."""
-    dry_run_result = dry_run_import(file_name=file_name, extension=extension)
-    if dry_run_result is None:
-        raise ValueError(f"Failed importing {extension} file")
-    # the dry run's own messages are only reported for a dry run; for a real
-    # import they are replaced below by the ones the actual import emitted
-    object_counts = {k: v for k, v in dry_run_result.items() if k != "messages"}
-    if dry_run:
-        if delete:
+    try:
+        dry_run_result = dry_run_import(
+            file_name=file_name,
+            extension=extension,
+            progress_cb=progress_callback_count(title="Reading file..."),
+        )
+        if dry_run_result is None:
+            raise ValueError(f"Failed importing {extension} file")
+        # the dry run's own messages are only reported for a dry run; for a real
+        # import they are replaced below by the ones the actual import emitted
+        object_counts = {k: v for k, v in dry_run_result.items() if k != "messages"}
+        if dry_run:
+            return dry_run_result
+        check_quota_people(to_add=object_counts["people"], tree=tree, user_id=user_id)
+        db_handle = get_db_outside_request(
+            tree=tree, view_private=True, readonly=False, user_id=user_id
+        )
+        try:
+            messages = run_import(
+                db_handle=db_handle,
+                file_name=file_name,
+                extension=extension.lower(),
+                delete=delete,
+                task=self,
+                progress_cb=progress_callback_count(title="Importing..."),
+            )
+        finally:
+            close_db(db_handle)
+    finally:
+        # a rejected file (malformed, over quota) never reaches the import
+        # that would otherwise delete it
+        if delete and os.path.isfile(file_name):
             try:
                 os.remove(file_name)
             except OSError as e:
                 logging.getLogger(__name__).warning(
                     "Failed to delete temporary file %s: %s", file_name, e
                 )
-        return dry_run_result
-    check_quota_people(to_add=object_counts["people"], tree=tree, user_id=user_id)
-    db_handle = get_db_outside_request(
-        tree=tree, view_private=True, readonly=False, user_id=user_id
-    )
-    try:
-        messages = run_import(
-            db_handle=db_handle,
-            file_name=file_name,
-            extension=extension.lower(),
-            delete=delete,
-            task=self,
-        )
-    finally:
-        close_db(db_handle)
     update_usage_people(tree=tree, user_id=user_id)
     # imported media objects can refer to files already on disk
     run_task(update_media_usage_task, tree=tree, user_id=user_id)
@@ -784,7 +790,11 @@ def import_media_archive(
         result = importer(progress_cb=progress_callback_count())
     finally:
         close_db(db_handle)
-    return result
+    # media paths are indexed, and matching files by name can change them
+    index_tasks: list[dict[str, str]] = []
+    if importer.paths_changed:
+        index_tasks = update_search_indices_after_import(tree=tree, user_id=user_id)
+    return {**result, "index_tasks": index_tasks}
 
 
 @shared_task()
@@ -832,6 +842,7 @@ def verify_database(
     translate = None
     if locale:
         gramps_locale = get_locale_for_language(locale, default=True)
+        assert gramps_locale is not None
         translate = gramps_locale.translation.sgettext
     db_handle = get_db_outside_request(
         tree=tree, view_private=True, readonly=True, user_id=user_id
@@ -912,6 +923,36 @@ def delete_objects_by_handle_task(
     return trans_dict
 
 
+@shared_task(bind=True, lock_key=LOCK_WRITE)
+def edit_objects_by_handle_task(
+    self,
+    tree: str,
+    user_id: str,
+    namespace: str,
+    handles: List[str],
+    operations: List[dict],
+) -> list[dict]:
+    """Edit specific objects of one type by handle, updating search indices."""
+    db_handle = get_db_outside_request(
+        tree=tree, view_private=True, readonly=False, user_id=user_id
+    )
+    try:
+        trans_dict = edit_objects_by_handle(
+            db_handle=db_handle,
+            namespace=namespace,
+            handles=handles,
+            operations=operations,
+            progress_cb=progress_callback_count(),
+        )
+    finally:
+        close_db(db_handle)
+    if trans_dict:
+        update_search_indices_from_transaction(
+            trans_dict=trans_dict, tree=tree, user_id=user_id
+        )
+    return trans_dict
+
+
 @shared_task(bind=True)
 def process_transactions(
     self,
@@ -922,9 +963,14 @@ def process_transactions(
     message: str = "Raw transaction",
 ):
     """Process a set of database transactions, updating search indices as needed."""
-    trans_dict = apply_transactions(
-        tree=tree, user_id=user_id, payload=payload, force=force, message=message
-    )
+    try:
+        trans_dict = apply_transactions(
+            tree=tree, user_id=user_id, payload=payload, force=force, message=message
+        )
+    except ValueError as exc:
+        # a rejected transaction is the client's error, as in the synchronous
+        # endpoint; aborting makes the task report it as a 400 rejection
+        abort_with_message(400, str(exc))
     update_search_indices_from_transaction(
         trans_dict=trans_dict, tree=tree, user_id=user_id
     )
@@ -1102,23 +1148,18 @@ def update_search_indices_from_transaction(
 
 
 @shared_task()
-def send_telemetry_task(tree: str):
-    """Send telemetry"""
-    if telemetry_sent_last_24h():
-        # Although this task will only be called by the backend if it hasn't been
-        # called in the last 24 hours, we check it here again because if a server
-        # is misconfigured and the celery worker is run in a container that doesn't
-        # have access to the same persistent cache as the backend, we don't want to
-        # send telemetry every time a request hits the API.
+def send_telemetry_task(tree: str, payload: dict | None = None):
+    """Send a telemetry payload built by the web process.
+
+    The 24 h check, timestamp update and payload (including the server UUID)
+    all happen in the web process, so a worker without access to the web
+    container's persistent cache neither sends extra pings nor uses its own
+    server UUID. ``tree`` is only passed for task tracking.
+    """
+    if payload is None:
+        # task queued by an older version that built the payload in the worker
         return None
-    data = get_telemetry_payload(tree_id=tree)
-    # Update timestamp before the HTTP call so that a failed send does not
-    # trigger an immediate retry on the next request. This also narrows (but
-    # does not fully eliminate) the window for concurrent workers to send
-    # duplicate pings: the race is now microseconds rather than a full
-    # HTTP round-trip.
-    update_telemetry_timestamp()
-    send_telemetry(data=data)
+    send_telemetry(data=payload)
 
 
 @shared_task(bind=True)
@@ -1132,8 +1173,19 @@ def process_chat(
     verbose: bool = False,
     message_history_raw: str | None = None,
     home_person_gramps_id: str | None = None,
+    allow_write_proposals: bool = False,
+    images: list[str] | None = None,
+    previous_proposal: str | None = None,
 ) -> dict[str, Any]:
-    """Process a chat query with the AI agent."""
+    """Process a chat query with the AI agent.
+
+    If `allow_write_proposals` is true, the agent may propose changes, which
+    are returned for the user to approve. `images` are base64 JPEGs as
+    returned by `normalize_image`; they are not kept in the returned history.
+    `previous_proposal` is "applied" if the user applied changes proposed in
+    any earlier answer since the last prompt, and "not_applied" if nothing
+    was applied and the previous answer had a proposal.
+    """
     # import here to avoid error if AI dependencies are not installed
     from pydantic_ai import ModelMessagesTypeAdapter
 
@@ -1142,6 +1194,8 @@ def process_chat(
         clean_answer,
         extract_metadata_from_result,
     )
+    from gramps_webapi.api.llm.deps import Proposal
+    from gramps_webapi.api.llm.images import strip_images
 
     # Create the reporter in the main worker thread: run_sync hands off tool
     # calls to a thread-pool executor, which has no task context.
@@ -1154,6 +1208,7 @@ def process_chat(
         step += 1
         report({"step": step, "tool": tool_name, "message": message})
 
+    proposal = Proposal() if allow_write_proposals else None
     result = answer_with_agent(
         prompt=query,
         tree=tree,
@@ -1163,7 +1218,14 @@ def process_chat(
         progress_callback=progress_callback,
         message_history_raw=message_history_raw,
         home_person_gramps_id=home_person_gramps_id,
+        proposal=proposal,
+        images=images,
+        previous_proposal=previous_proposal,
     )
+    # charged here rather than by the endpoint, so a chat run on the task
+    # queue is charged too; each image is sent with every model request of
+    # the turn, costing about as much as another message
+    update_usage_ai(new=1 + len(images or []), tree=tree)
 
     response_text = clean_answer(
         result.response.text or "",
@@ -1174,9 +1236,15 @@ def process_chat(
     response_dict: dict[str, Any] = {
         "response": response_text,
         "message_history_raw": ModelMessagesTypeAdapter.dump_json(
-            result.all_messages()
+            strip_images(result.all_messages())
         ).decode(),
     }
+
+    if proposal and proposal.changes:
+        response_dict["proposal"] = {
+            "summary": proposal.summaries,
+            "transaction": proposal.transaction,
+        }
 
     if verbose:
         response_dict["metadata"] = extract_metadata_from_result(result)

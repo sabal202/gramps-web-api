@@ -17,11 +17,15 @@ and API parameters are then still accepted but ignored.
 
 | Version | Target | Gramps | Breaking changes |
 |---|---|---|---|
-| 3.25.x | current | 6.0 | semantic search removed |
-| 3.26.0 | late November 2026 | 6.0 | none |
+| 3.26.x | current | 6.0 | Gramps QL removed, `/query/` request body |
+| 3.27.0 | end of November 2026 | 6.0 |
 | 3.x | as needed | 6.0 | none |
 | 4.0.0 | TBD | 6.1 | multi-tree by default, removals below |
 | 5.0.0 | TBD | 6.2 | TBD |
+
+## Breaking in 3.27
+
+TBD
 
 ## Breaking in 4.0
 

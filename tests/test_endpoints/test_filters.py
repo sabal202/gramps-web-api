@@ -31,6 +31,7 @@ import unittest
 from unittest.mock import patch
 
 import gramps.gen.filters.rules.person as person_rules
+from gramps.gen.db.generic import DbGeneric
 from gramps.gen.filters.rules import Rule
 from gramps.gen.plug import BasePluginManager
 from gramps.gen.utils.grampslocale import GrampsLocale
@@ -385,6 +386,54 @@ class TestFiltersPeopleSingleTree(unittest.TestCase):
 def make_handle() -> str:
     """Make a new valid handle."""
     return str(uuid.uuid4())
+
+
+class TestSavedFilterErrorDetails(unittest.TestCase):
+    """Saving and applying custom filters (single-tree only) with errors."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_single_tree_test_client()
+
+    def test_saving_invalid_goql_is_rejected(self):
+        header = fetch_header(self.client)
+        name = "InvalidGoqlTestFilter"
+        payload = {
+            "name": name,
+            "rules": [
+                {"name": "HasNote"},
+                {"name": "MatchesQuery", "values": ["not_a_field == 1"]},
+            ],
+        }
+        for method in (self.client.post, self.client.put):
+            rv = method(TEST_URL + "people", json=payload, headers=header)
+            self.assertEqual(rv.status_code, 422)
+            error = rv.json["error"]
+            self.assertEqual(error["message"], "Invalid MatchesQuery expression")
+            self.assertEqual(error["type"], "invalid_query")
+            (detail,) = error["messages"]["json"]["rules"]["1"]["values"]["0"]
+            self.assertIn("not_a_field", detail)
+        rv = self.client.get(TEST_URL + "people/" + name, headers=header)
+        self.assertEqual(rv.status_code, 404)
+
+    def test_saved_filter_evaluation_error(self):
+        header = fetch_header(self.client)
+        name = "UnparsableValueDetailsTestFilter"
+        payload = {
+            "name": name,
+            "rules": [{"name": "HasAddress", "values": ["x", "y"]}],
+        }
+        rv = self.client.post(TEST_URL + "people", json=payload, headers=header)
+        self.assertEqual(rv.status_code, 201)
+        try:
+            rv = self.client.get(BASE_URL + "/people/?filter=" + name, headers=header)
+            self.assertEqual(rv.status_code, 422)
+            error = rv.json["error"]
+            self.assertEqual(error["message"], f"Filter {name} could not be evaluated")
+            (detail,) = error["messages"]["query"]["filter"]
+            self.assertTrue(detail)
+        finally:
+            self.client.delete(TEST_URL + "people/" + name, headers=header)
 
 
 class TestHasAssociationType(unittest.TestCase):
@@ -821,6 +870,74 @@ class TestNestedFilters(unittest.TestCase):
         assert "HasBirth values must be strings, numbers or booleans" in message
 
 
+class TestFilterErrorDetails(unittest.TestCase):
+    """A filter error is a short `message`, with the error's own text in
+    `messages` at the place in the request that caused it, keyed like a
+    marshmallow schema error.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_test_client()
+
+    def _error(self, filter_dict: dict) -> dict:
+        rv = self.client.get(
+            BASE_URL + "/people/",
+            query_string={"rules": json.dumps(filter_dict)},
+            headers=fetch_header(self.client),
+        )
+        assert rv.status_code == 422, rv.json
+        return rv.json["error"]
+
+    def test_invalid_goql_expression(self):
+        for expression, text in [
+            ("primary_name.frist_name == 'x'", "unknown field 'frist_name'"),
+            ("gramps_id ==", "invalid syntax"),
+        ]:
+            error = self._error(
+                {"rules": [{"name": "MatchesQuery", "values": [expression]}]}
+            )
+            assert error["message"] == "Invalid MatchesQuery expression"
+            assert error["type"] == "invalid_query"
+            (detail,) = error["messages"]["query"]["rules"]["rules"]["0"]["values"]["0"]
+            assert text in detail
+
+    def test_invalid_goql_in_sub_filter(self):
+        """The path leads to the rule inside the nested filter, and the
+        expression is rejected before anything is evaluated."""
+        error = self._error(
+            {
+                "rules": [
+                    {"name": "HasNote"},
+                    {
+                        "rules": [
+                            {"name": "MatchesQuery", "values": ["gramps_id == 'x'"]},
+                            {"name": "MatchesQuery", "values": ["not_a_field == 1"]},
+                        ]
+                    },
+                ]
+            }
+        )
+        assert error["message"] == "Invalid MatchesQuery expression"
+        rule = error["messages"]["query"]["rules"]["rules"]["1"]["rules"]["1"]
+        assert "not_a_field" in rule["values"]["0"][0]
+
+    def test_rule_evaluation_error(self):
+        """A rule that fails while evaluated names itself in `message`; the
+        rule's own error is in `messages`, with no `type`."""
+        error = self._error({"rules": [{"name": "HasAddress", "values": ["x", "y"]}]})
+        assert error["message"] == "Rule HasAddress could not be evaluated"
+        assert "type" not in error
+        (detail,) = error["messages"]["query"]["rules"]["rules"]["0"]
+        assert detail
+
+    def test_schema_error_messages(self):
+        error = self._error({"function": "xor", "rules": []})
+        assert error["message"] == "Filter does not adhere to schema"
+        messages = error["messages"]["query"]["rules"]
+        assert set(messages) == {"function", "rules"}
+
+
 class TestExcludedRules(unittest.TestCase):
     """Rules that cannot work in their namespace are not exposed."""
 
@@ -1129,6 +1246,130 @@ class TestCrossNamespaceFilters(unittest.TestCase):
         assert status == 400
 
 
+class TestGoqlRulesPrivacy(unittest.TestCase):
+    """HasAssociationType and IsReferencedByObjectType respect privacy.
+
+    The owner's query runs in SQL, the guest's is evaluated per object on
+    the restricted database.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_test_client()
+        headers = fetch_header(cls.client)
+        cls.rel = "GoqlRuleRel" + make_handle()[:8]
+        cls.target = make_handle()
+        cls.public_assoc = make_handle()
+        cls.private_assoc = make_handle()
+        cls.public_media = make_handle()
+        cls.private_media = make_handle()
+        cls.public_referrer = make_handle()
+        cls.private_referrer = make_handle()
+        # media objects without a file, as POST /api/media/ uploads a file
+        rv = cls.client.post(
+            "/api/objects/",
+            json=[
+                {"_class": "Media", "handle": cls.public_media},
+                {"_class": "Media", "handle": cls.private_media},
+            ],
+            headers=headers,
+        )
+        assert rv.status_code == 201
+        cls.objects = [
+            ("/api/people/", {"_class": "Person", "handle": cls.target}),
+            (
+                "/api/people/",
+                {
+                    "_class": "Person",
+                    "handle": cls.public_assoc,
+                    "person_ref_list": [
+                        {"_class": "PersonRef", "rel": cls.rel, "ref": cls.target}
+                    ],
+                },
+            ),
+            (
+                "/api/people/",
+                {
+                    "_class": "Person",
+                    "handle": cls.private_assoc,
+                    "person_ref_list": [
+                        {
+                            "_class": "PersonRef",
+                            "rel": cls.rel,
+                            "ref": cls.target,
+                            "private": True,
+                        }
+                    ],
+                },
+            ),
+            (
+                "/api/people/",
+                {
+                    "_class": "Person",
+                    "handle": cls.public_referrer,
+                    "media_list": [{"_class": "MediaRef", "ref": cls.public_media}],
+                },
+            ),
+            (
+                "/api/people/",
+                {
+                    "_class": "Person",
+                    "handle": cls.private_referrer,
+                    "private": True,
+                    "media_list": [{"_class": "MediaRef", "ref": cls.private_media}],
+                },
+            ),
+        ]
+        for endpoint, payload in cls.objects:
+            rv = cls.client.post(endpoint, json=payload, headers=headers)
+            assert rv.status_code == 201
+
+    @classmethod
+    def tearDownClass(cls):
+        headers = fetch_header(cls.client)
+        for endpoint, payload in reversed(cls.objects):
+            rv = cls.client.delete(f"{endpoint}{payload['handle']}", headers=headers)
+            assert rv.status_code in (200, 204)
+        for handle in (cls.public_media, cls.private_media):
+            rv = cls.client.delete(f"/api/media/{handle}", headers=headers)
+            assert rv.status_code in (200, 204)
+
+    def _handles(self, endpoint: str, rule: str, value: str, role: str) -> set:
+        filter_dict = {"rules": [{"name": rule, "values": [value]}]}
+        rv = self.client.get(
+            endpoint,
+            query_string={"rules": json.dumps(filter_dict)},
+            headers=fetch_header(self.client, role=role),
+        )
+        assert rv.status_code == 200
+        return {obj["handle"] for obj in rv.json}
+
+    def test_has_association_type(self):
+        owner = self._handles(
+            "/api/people/", "HasAssociationType", self.rel, ROLE_OWNER
+        )
+        assert owner == {self.public_assoc, self.private_assoc}
+        guest = self._handles(
+            "/api/people/", "HasAssociationType", self.rel, ROLE_GUEST
+        )
+        assert guest == {self.public_assoc}
+
+    def test_is_referenced_by_object_type(self):
+        new_media = {self.public_media, self.private_media}
+        owner = self._handles(
+            "/api/media/", "IsReferencedByObjectType", "Person", ROLE_OWNER
+        )
+        assert owner & new_media == new_media
+        guest = self._handles(
+            "/api/media/", "IsReferencedByObjectType", "Person", ROLE_GUEST
+        )
+        assert guest & new_media == {self.public_media}
+        # no media is referenced by a tag
+        assert not self._handles(
+            "/api/media/", "IsReferencedByObjectType", "Tag", ROLE_OWNER
+        )
+
+
 class TestMatchesQuery(unittest.TestCase):
     """Test cases for the MatchesQuery (GOQL expression) rule."""
 
@@ -1326,6 +1567,57 @@ class TestMatchesQuery(unittest.TestCase):
         assert status == 200
         assert self.secret_name_handle in handles
         assert self.private_handle not in handles
+
+    def test_list_loads_only_matching_objects(self):
+        """A list filtered in SQL loads no other object."""
+        loaded = []
+        get_event_from_handle = DbGeneric.get_event_from_handle
+
+        def get_event(db, handle):
+            loaded.append(handle)
+            return get_event_from_handle(db, handle)
+
+        def iter_events(db):
+            raise AssertionError("all events loaded")
+
+        with (
+            patch.object(DbGeneric, "get_event_from_handle", get_event),
+            patch.object(DbGeneric, "iter_events", iter_events),
+        ):
+            status, handles = self._query(
+                "/api/events/", self._rule(f"description == '{self.description}'")
+            )
+        assert status == 200
+        assert handles == {self.event_handle}
+        assert set(loaded) == {self.event_handle}
+
+    def test_list_sorted_and_counted_after_filter(self):
+        """A filtered list is sorted and paged as before."""
+        headers = fetch_header(self.client)
+        rules = json.dumps(self._rule("date.dateval[1] == 10"))
+        rv = self.client.get(
+            "/api/events/",
+            query_string={"rules": rules, "keys": "gramps_id"},
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        ids = [obj["gramps_id"] for obj in rv.json]
+        assert len(ids) > 10
+        assert ids == sorted(ids)
+        rv = self.client.get(
+            "/api/events/",
+            query_string={
+                "rules": rules,
+                "keys": "gramps_id",
+                "sort": "-gramps_id",
+                "page": 2,
+                "pagesize": 5,
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        assert rv.headers["X-Total-Count"] == str(len(ids))
+        assert [obj["gramps_id"] for obj in rv.json] == ids[::-1][5:10]
 
     def test_invalid_expression_returns_422(self):
         """Unparsable expressions and unknown fields return 422."""

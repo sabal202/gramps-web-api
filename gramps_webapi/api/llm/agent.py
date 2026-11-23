@@ -40,6 +40,11 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .deps import AgentDeps
+from .propose import (
+    WRITE_PROPOSALS_PROMPT,
+    propose_change,
+    propose_delete,
+)
 from .tools import (
     analyze_lineages,
     analyze_tree_connectivity,
@@ -68,10 +73,18 @@ from .tools import (
     search_genealogy_database,
 )
 
+# rough character equivalent of an image's tokens
+IMAGE_CHARS = 6000
+
 
 def _part_chars(part) -> int:
     """Rough character count of a message part."""
     content = getattr(part, "content", None)
+    if isinstance(content, list) and isinstance(part, UserPromptPart):
+        # text and images; str() of an image would count its bytes
+        return sum(
+            len(item) if isinstance(item, str) else IMAGE_CHARS for item in content
+        )
     if content is not None:
         return len(content) if isinstance(content, str) else len(str(content))
     args = getattr(part, "args", None)
@@ -195,6 +208,21 @@ Prefer filter_people / filter_families / filter_events for concrete criteria
 {search_strategy}
 
 
+FILTER QUERIES
+
+The filter tools take a `query`, a Python-like expression on the fields of the objects (see the tool descriptions for the fields and examples):
+
+- Combine conditions with `and`, `or`, `not` and parentheses.
+- Text: `'Smith' in surname` matches part of the text, ignoring case. Prefer it to `==`, which is exact and case-sensitive.
+- Follow links with dots, e.g. `birth.date.sortval` or `mother.birth.date.sortval`.
+- Dates: compare `date.sortval` with `Date('1850')`, the start of 1850. Born in 1850: `Date('1850') <= birth.date.sortval < Date('1851')`. A missing date has the sortval 0, so give "before" a lower bound: `0 < birth.date.sortval < Date('1900')`. Approximate dates ("about 1850") compare like exact ones.
+- Lists: `any(events, condition)` is true if an item matches; `len(children)` counts the items, `len(children, condition)` the matching ones.
+- Constants: `Person.FEMALE`, `EventType.BURIAL`, `FamilyRelType.MARRIED` etc. Custom event types: `type.string == 'Coronation'`.
+- Arithmetic is not supported, e.g. no ages computed from two dates.
+- Places: use the place parameters, or the function `located_in` in the query, with the place's field first, e.g. `located_in(birth.place, 'Denmark')` or `located_in(mother.birth.place, 'Denmark')`. Both also match enclosing places, e.g. a city in Denmark. Never compare place names in the query yourself: the name of a place does not include its country.
+- If a query is invalid, the error names the valid fields or constants: fix the query and try again.
+
+
 MULTI-STEP LOOKUPS
 
 Call get_person, get_family, get_event, get_place, or get_note when you need details not in your current results. The links in tool results encode the object type in their path: `/person/ID` → get_person, `/family/ID` → get_family, `/event/ID` → get_event, `/place/ID` → get_place, `/note/ID` → get_note. Always use the matching tool for the link you are following. Records only show the beginning of their notes; call get_note when a note may contain the answer.
@@ -261,6 +289,7 @@ def create_agent(
     model_name: str,
     base_url: str | None = None,
     system_prompt_override: str | None = None,
+    allow_write_proposals: bool = False,
 ) -> Agent[AgentDeps, str]:
     """Create a Pydantic AI agent with the specified model.
 
@@ -274,6 +303,8 @@ def create_agent(
             model_name contains a provider prefix, except for "ollama:", where
             it takes precedence over the OLLAMA_BASE_URL environment variable.
         system_prompt_override: Optional override for the system prompt
+        allow_write_proposals: Whether to add the tools that propose changes,
+            and their instructions to the system prompt
 
     Returns:
         A configured Pydantic AI agent
@@ -298,6 +329,8 @@ def create_agent(
     system_prompt = system_prompt_override or SYSTEM_PROMPT_TEMPLATE.format(
         search_strategy=SEARCH_STRATEGY_FULLTEXT
     )
+    if allow_write_proposals:
+        system_prompt += WRITE_PROPOSALS_PROMPT
 
     agent = Agent(
         model,
@@ -330,4 +363,9 @@ def create_agent(
     agent.tool(analyze_lineages)
     agent.tool(check_tree_integrity)
     agent.tool(find_key_people)
+    if allow_write_proposals:
+        # invalid arguments are returned to the model, which may need a few
+        # attempts to get the format right
+        agent.tool(retries=3)(propose_change)
+        agent.tool(retries=3)(propose_delete)
     return agent

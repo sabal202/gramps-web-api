@@ -35,6 +35,7 @@ from gramps.gen.config import set as setconfig
 from gramps.gen.db.utils import get_dbid_from_path
 from gramps.gen.errors import HandleError
 from PIL import Image
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .api import api_blueprint
 from .api.cache import persistent_cache, request_cache, thumbnail_cache
@@ -53,7 +54,12 @@ from .api.resources.schemas import (
     TagSchema,
 )
 from .api.tasks import run_task, send_telemetry_task
-from .api.telemetry import get_server_uuid, should_send_telemetry
+from .api.telemetry import (
+    get_server_uuid,
+    get_telemetry_payload,
+    should_send_telemetry,
+    update_telemetry_timestamp,
+)
 from .api.util import close_db, get_tree_from_jwt
 from .auth import user_db
 from .auth.oidc import init_oidc
@@ -62,7 +68,7 @@ from .const import API_PREFIX, ENV_CONFIG_FILE, TREE_MULTI, VERSION
 from .dbmanager import WebDbManager
 from .future_gramps import apply_patches as apply_future_gramps_patches
 from .sentry import init_sentry
-from .util import pin_postgres_driver
+from .util import pin_postgres_driver, set_gramps_resources_env
 from .util.celery import create_celery
 
 _LOG = logging.getLogger(__name__)
@@ -83,6 +89,7 @@ def deprecated_config_from_env(app):
 def create_app(config: Optional[Dict[str, Any]] = None, config_from_env: bool = True):
     """Flask application factory."""
     apply_future_gramps_patches()
+    set_gramps_resources_env()
 
     app = Flask(__name__)
 
@@ -111,6 +118,14 @@ def create_app(config: Optional[Dict[str, Any]] = None, config_from_env: bool = 
     for option in required_options:
         if not app.config.get(option):
             raise ValueError(f"{option} must be specified")
+
+    # trust X-Forwarded-For from this many reverse proxies, so that
+    # request.remote_addr (used e.g. as rate limiting key) is the client's IP;
+    # x_proto defaults to 1 in ProxyFix, so disable it explicitly
+    if proxy_fix_x_for := int(app.config.get("PROXY_FIX_X_FOR") or 0):
+        app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+            app.wsgi_app, x_for=proxy_fix_x_for, x_proto=0
+        )
 
     # pin the driver once, so every user of the config gets psycopg2
     app.config["USER_DB_URI"] = pin_postgres_driver(app.config["USER_DB_URI"])
@@ -371,7 +386,13 @@ def create_app(config: Optional[Dict[str, Any]] = None, config_from_env: bool = 
             return None
         try:
             if should_send_telemetry():
-                run_task(send_telemetry_task, tree=tree_id)
+                # Update the timestamp before queueing, so that the next
+                # request doesn't queue another task (and a failed send does
+                # not trigger an immediate retry). Build the payload here, so
+                # the server UUID comes from the web process's cache.
+                update_telemetry_timestamp()
+                payload = get_telemetry_payload(tree_id)
+                run_task(send_telemetry_task, tree=tree_id, payload=payload)
         except Exception as exc:
             _LOG.warning("Telemetry error: %s", exc)
 

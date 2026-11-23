@@ -1,0 +1,1 @@
+{"attributes": {"oidc.ciba.grant.enabled": "false", "client.secret.creation.time": "1782379376", "backchannel.logout.session.required": "true", "backchannel.logout.url": null, "post.logout.redirect.uris": "https://gramps.sabal.pro/*", "display.on.consent.screen": "false", "oauth2.device.authorization.grant.enabled": "false", "backchannel.logout.revoke.offline.tokens": "false"}}

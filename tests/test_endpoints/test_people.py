@@ -395,34 +395,9 @@ class TestPeople(unittest.TestCase):
             if item["gender"] == 1:
                 self.assertLess(len(item["family_list"]), 2)
 
-    def test_get_people_parameter_gql_validate_semantics(self):
-        """Test invalid rules syntax."""
-        check_invalid_semantics(self, TEST_URL + "?gql=()")
-
-    def test_get_people_parameter_gql_handle(self):
-        """Test invalid rules syntax."""
-        rv = check_success(
-            self,
-            TEST_URL + "?gql=" + quote("gramps_id=I0044"),
-        )
-        assert len(rv) == 1
-        assert rv[0]["gramps_id"] == "I0044"
-
-    def test_get_people_parameter_gql_like(self):
-        """Test invalid rules syntax."""
-        rv = check_success(
-            self,
-            TEST_URL + "?gql=" + quote("gramps_id ~ I004"),
-        )
-        assert len(rv) == 10
-
-    def test_get_people_parameter_gql_or(self):
-        """Test invalid rules syntax."""
-        rv = check_success(
-            self,
-            TEST_URL + "?gql=" + quote("(gramps_id ~ I004 or gramps_id ~ I003)"),
-        )
-        assert len(rv) == 20
+    def test_get_people_parameter_gql_removed(self):
+        """Test the removed gql parameter is rejected."""
+        check_invalid_semantics(self, TEST_URL + "?gql=" + quote("gramps_id=I0044"))
 
     def test_get_people_parameter_oql_removed(self):
         """Test the removed oql parameter is rejected."""
@@ -1199,6 +1174,32 @@ class TestPeopleHandle(unittest.TestCase):
         """Test address dates are formatted in the profile."""
         rv = check_success(self, TEST_URL + "GNUJQCL9MD64AM56OH?profile=self")
         self.assertEqual(rv["profile"]["addresses"], [{"date_str": "2000-01-02"}])
+
+    def test_get_people_handle_parameter_date_format(self):
+        """Test custom date formatting and request isolation."""
+        custom = check_success(
+            self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=self&date_format=1"
+        )
+        self.assertNotEqual(custom["profile"]["birth"]["date"], "1906-09-05")
+
+        default = check_success(self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=self")
+        format_zero = check_success(
+            self, TEST_URL + "0PWJQCZYFXOS0HGREE?profile=self&date_format=0"
+        )
+        self.assertEqual(default["profile"]["birth"]["date"], "1906-09-05")
+        self.assertEqual(
+            default["profile"]["birth"]["date"], format_zero["profile"]["birth"]["date"]
+        )
+
+    def test_get_people_handle_parameter_date_format_german_locale(self):
+        """Test German date formats use German indices and numeric formatting."""
+        base_url = TEST_URL + "0PWJQCZYFXOS0HGREE?profile=self&locale=de"
+
+        numeric = check_success(self, base_url + "&date_format=1")
+        self.assertEqual(numeric["profile"]["birth"]["date"], "5.9.1906")
+
+        padded_numeric = check_success(self, base_url + "&date_format=6")
+        self.assertEqual(padded_numeric["profile"]["birth"]["date"], "05.09.1906")
 
     def test_get_people_handle_parameter_profile_expected_result_age(self):
         """Test profile parameter age option."""

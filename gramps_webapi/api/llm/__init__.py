@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from flask import current_app
 from openai import OpenAIError
+from pydantic import ValidationError
 from pydantic_ai import ModelMessagesTypeAdapter, capture_run_messages
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
@@ -33,7 +34,8 @@ from pydantic_ai.usage import UsageLimits
 
 from ..util import abort_with_message, close_db, get_db_outside_request, get_logger
 from .agent import create_agent
-from .deps import AgentDeps
+from .deps import AgentDeps, Proposal
+from .images import image_parts, strip_images
 
 # e.g. https://www.example.com, followed by the path of a link
 _PLACEHOLDER_ORIGIN = re.compile(r"https?://(?:[\w-]+\.)*example\.(?:com|org|net)(?=/)")
@@ -143,6 +145,17 @@ def extract_metadata_from_result(result) -> dict[str, Any]:
     return metadata
 
 
+_CHECK_DATABASE = "Check the database before you rely on those records."
+
+# what the user did with proposed changes since the last prompt
+PREVIOUS_PROPOSAL_NOTES = {
+    "applied": "The user applied changes you proposed earlier in this "
+    f"conversation. {_CHECK_DATABASE}",
+    "not_applied": "The user did not apply the changes you proposed in your "
+    f"previous answer; they are not in the database. {_CHECK_DATABASE}",
+}
+
+
 def _output_limit_reached(messages: list[ModelMessage]) -> bool:
     """Whether the last model response was cut off at the output token limit."""
     responses = [msg for msg in messages if isinstance(msg, ModelResponse)]
@@ -158,6 +171,9 @@ def answer_with_agent(
     progress_callback: Callable[[str, str], None] | None = None,
     message_history_raw: str | None = None,
     home_person_gramps_id: str | None = None,
+    proposal: Proposal | None = None,
+    images: list[str] | None = None,
+    previous_proposal: str | None = None,
 ):
     """Answer a prompt using Pydantic AI agent.
 
@@ -172,6 +188,16 @@ def answer_with_agent(
             When provided, takes precedence over history.
         home_person_gramps_id: Optional Gramps ID of the user's home person,
             supplied by the frontend; anchors the get_home_person/kinship tools.
+        proposal: If given, the agent may propose changes, which are
+            collected here. Ignored unless LLM_ALLOW_WRITE_PROPOSALS is set.
+        images: Optional images attached to the prompt, as returned by
+            normalize_image.
+        previous_proposal: "applied" if the user applied changes proposed in
+            any earlier answer since the last prompt; "not_applied" if nothing
+            was applied and the previous answer had a proposal. The frontend
+            strips tool calls from the history, so the model can't tell
+            otherwise.
+>>>>>>> upstream/master
 
     Returns:
         AgentRunResult containing the response and metadata
@@ -187,6 +213,8 @@ def answer_with_agent(
     max_requests = config.get("LLM_MAX_REQUESTS", 15)
     max_tokens = config.get("LLM_MAX_TOKENS", 200_000)
     max_output_tokens = config.get("LLM_MAX_OUTPUT_TOKENS")
+    if not config.get("LLM_ALLOW_WRITE_PROPOSALS"):
+        proposal = None
 
     if not model_name:
         logger.error("No LLM model specified")
@@ -197,6 +225,7 @@ def answer_with_agent(
             model_name=model_name,
             base_url=base_url,
             system_prompt_override=system_prompt_override,
+            allow_write_proposals=proposal is not None,
         )
     except (UserError, ValueError, ImportError, OpenAIError) as e:
         # e.g. unknown provider prefix, missing provider API key/base URL
@@ -211,6 +240,7 @@ def answer_with_agent(
         user_id=user_id,
         progress_callback=progress_callback,
         home_person_gramps_id=home_person_gramps_id,
+        proposal=proposal,
     )
 
     message_history: list[ModelRequest | ModelResponse] = []
@@ -221,6 +251,7 @@ def answer_with_agent(
             )
         except Exception as e:  # pylint: disable=broad-except
             raise ValueError(f"Invalid message_history_raw: {e}") from e
+        message_history = strip_images(message_history)
     elif history:
         for message in history:
             if "role" not in message or "message" not in message:
@@ -244,12 +275,15 @@ def answer_with_agent(
 
     messages: list[ModelMessage] = []
     try:
-        logger.debug("Running Pydantic AI agent with prompt: '%s'", prompt)
+        # never log the prompt or the answer, they contain private chat content
+        logger.debug("Running Pydantic AI agent")
         with capture_run_messages() as messages:
             result = agent.run_sync(
-                prompt,
+                [prompt, *image_parts(images)] if images else prompt,
                 deps=deps,
                 message_history=message_history,
+                # only sent with this turn, later turns don't repeat it
+                instructions=PREVIOUS_PROPOSAL_NOTES.get(previous_proposal or ""),
                 usage_limits=usage_limits,
                 # no default, as providers reject values above the model's limit
                 model_settings=(
@@ -258,7 +292,7 @@ def answer_with_agent(
                     else None
                 ),
             )
-        logger.debug("Agent response: '%s'", result.response.text or "")
+        logger.debug("Agent finished with reason: %s", result.response.finish_reason)
         if result.response.finish_reason == "length":
             logger.warning(
                 "AI answer cut off at the output token limit, see "
@@ -280,6 +314,14 @@ def answer_with_agent(
         if e.status_code in (502, 503, 504, 529):
             # 529 is Anthropic's "overloaded"
             abort_with_message(503, "The AI model provider is temporarily unavailable.")
+        if images and e.status_code in (400, 415, 422):
+            # providers reject images with different messages, if the model
+            # does not support them
+            abort_with_message(
+                400,
+                "The AI model could not process the attached images. "
+                "It may not support images.",
+            )
         abort_with_message(502, "The AI model provider returned an error.")
     except httpx.TimeoutException as e:
         logger.error("Model provider request timed out: %r", e)
@@ -299,7 +341,20 @@ def answer_with_agent(
             abort_with_message(
                 400, "The AI model's response exceeded its output token limit."
             )
-        logger.error("Pydantic AI error: %s", e)
+        if isinstance(e.__cause__, (ValidationError, ModelRetry)):
+            # the model kept calling a tool with invalid arguments, despite
+            # the error messages it got back; the message names the tool
+            logger.warning("AI model gave up on a tool: %s", e)
+            abort_with_message(
+                502,
+                "The AI model could not use its tools correctly. "
+                "Please try again or rephrase your request.",
+            )
+        # str(e) can include the model's response body
+        logger.error(
+            "Pydantic AI error: %s",
+            e.message if isinstance(e, UnexpectedModelBehavior) else type(e).__name__,
+        )
         abort_with_message(500, "Error communicating with the AI model")
     except Exception:
         logger.exception("Unexpected error in agent")
