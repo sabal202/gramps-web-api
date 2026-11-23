@@ -78,19 +78,26 @@ def get_family_surname(name):
 def get_patronymic(name):
     """Return the patronymic of a Gramps ``Name``, or "" if there is none.
 
-    In the Russian naming tradition the отчество is stored as a surname entry
-    with origintype PATRONYMIC (or MATRONYMIC). Returns the surname string of
-    the first such entry so it can be shown as its own column instead of being
-    folded into the family surname.
+    Two storage conventions are supported. Legacy: отчество as a surname entry
+    with origintype PATRONYMIC/MATRONYMIC. GIVN-based (2026-11 convention):
+    отчество as the last token of ``first_name`` ("Александра Сергеевна") —
+    how MyHeritage/Genotek and most GEDCOM consumers store Russian names.
     """
-    from gramps.gen.lib import NameOriginType
+    surnames = name.get_surname_list()
+    if surnames:
+        from gramps.gen.lib import NameOriginType
 
-    want = {NameOriginType.PATRONYMIC, NameOriginType.MATRONYMIC}
-    for surn in name.get_surname_list():
-        if surn.get_origintype().value in want:
-            patronymic = surn.get_surname().strip()
-            if patronymic:
-                return patronymic
+        want = {NameOriginType.PATRONYMIC, NameOriginType.MATRONYMIC}
+        for surn in surnames:
+            if surn.get_origintype().value in want:
+                patronymic = surn.get_surname().strip()
+                if patronymic:
+                    return patronymic
+    tokens = (name.get_first_name() or "").split()
+    if len(tokens) >= 2 and tokens[-1].lower().endswith(
+        ("ович", "евич", "ич", "овна", "евна", "ична", "инична")
+    ):
+        return tokens[-1]
     return ""
 
 
